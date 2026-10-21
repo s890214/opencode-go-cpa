@@ -93,6 +93,8 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 				// belong to other protocols.
 				if endpoint, ok := rec.EndpointPaths[string(sourceRoute)]; ok && endpoint != "" {
 					rec.EndpointPath = endpoint
+				} else if configured := cfg.ProtocolEndpoints[string(sourceRoute)]; configured != "" {
+					rec.EndpointPath = configured
 				} else {
 					rec.EndpointPath = sourceRoute.EndpointPath()
 				}

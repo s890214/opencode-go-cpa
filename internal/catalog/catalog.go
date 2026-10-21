@@ -124,23 +124,46 @@ type rawThinking struct {
 	Levels         []string `json:"levels"`
 }
 
-// prefixRoutes covers unknown variants of known families;
-// longest prefix wins (list is ordered longest-first).
-var prefixRoutes = []struct {
-	prefix string
-	route  Route
-}{
-	{"muse-spark", RouteResponses},
-	{"deepseek", RouteChatCompletions},
-	{"minimax", RouteMessages},
-	{"longcat", RouteChatCompletions},
-	{"grok", RouteResponses},
-	{"gpt", RouteResponses},
-	{"kimi", RouteChatCompletions},
-	{"qwen", RouteMessages},
-	{"glm", RouteChatCompletions},
-	{"mimo", RouteChatCompletions},
-	{"hy", RouteChatCompletions},
+// defaultFallbackRoutes covers model families the operator has not listed.
+// It is only consulted when `fallback-routes` is empty — the configured table
+// (and `models`) always wins, so a new family needs a config edit, not a
+// release. Order matters: the first matching prefix wins.
+var defaultFallbackRoutes = []config.FallbackRoute{
+	{Prefix: "muse-spark", Protocol: string(RouteResponses)},
+	{Prefix: "deepseek", Protocol: string(RouteChatCompletions)},
+	{Prefix: "minimax", Protocol: string(RouteMessages)},
+	{Prefix: "longcat", Protocol: string(RouteChatCompletions)},
+	{Prefix: "grok", Protocol: string(RouteResponses)},
+	{Prefix: "gpt", Protocol: string(RouteResponses)},
+	{Prefix: "kimi", Protocol: string(RouteChatCompletions)},
+	{Prefix: "qwen", Protocol: string(RouteMessages)},
+	{Prefix: "glm", Protocol: string(RouteChatCompletions)},
+	{Prefix: "mimo", Protocol: string(RouteChatCompletions)},
+	{Prefix: "hy", Protocol: string(RouteChatCompletions)},
+}
+
+// fallbackRoute resolves an unlisted model by family prefix.
+func (m *Manager) fallbackRoute(upstreamID string) (Route, bool) {
+	routes := m.cfg.FallbackRoutes
+	if len(routes) == 0 {
+		routes = defaultFallbackRoutes
+	}
+	lower := strings.ToLower(upstreamID)
+	for _, r := range routes {
+		if strings.HasPrefix(lower, r.Prefix) {
+			return Route(r.Protocol), true
+		}
+	}
+	return "", false
+}
+
+// endpointPath resolves a protocol's path: the configured one when present,
+// the protocol default otherwise.
+func (m *Manager) endpointPath(route Route) string {
+	if path := m.cfg.ProtocolEndpoints[string(route)]; path != "" {
+		return path
+	}
+	return route.EndpointPath()
 }
 
 // Manager owns the catalog snapshot. All accessors are safe for
@@ -388,7 +411,7 @@ func (m *Manager) endpointPathsFor(upstreamID string) map[string]string {
 		if endpoint := mc.EndpointFor(name); endpoint != "" {
 			out[name] = endpoint
 		} else {
-			out[name] = route.EndpointPath()
+			out[name] = m.endpointPath(route)
 		}
 	}
 	return out
@@ -481,11 +504,8 @@ func (m *Manager) resolve(e rawModel) (Route, string, bool, string) {
 		}
 		return def, endpoint, true, reason
 	}
-	id := strings.ToLower(e.ID)
-	for _, p := range prefixRoutes {
-		if strings.HasPrefix(id, p.prefix) {
-			return p.route, "", true, ""
-		}
+	if route, ok := m.fallbackRoute(e.ID); ok {
+		return route, "", true, ""
 	}
 	return "", "", false, ""
 }

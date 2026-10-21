@@ -76,6 +76,23 @@ const (
 	ShapeContent ReasoningShape = "content"
 )
 
+// FallbackRoute maps a model-name prefix to the protocol used when the model
+// is not listed in `models`. It replaces the hardcoded family table, so an
+// operator can teach the plugin a new model family without a release.
+type FallbackRoute struct {
+	Prefix   string `yaml:"prefix"`
+	Protocol string `yaml:"protocol"`
+}
+
+// DefaultProtocolEndpoints are the paths each protocol lives at when the
+// operator does not override them. They are configuration, not constants:
+// an upstream can move a path without needing a new plugin build.
+var DefaultProtocolEndpoints = map[string]string{
+	"chat-completions": "/v1/chat/completions",
+	"messages":         "/v1/messages",
+	"responses":        "/v1/responses",
+}
+
 // ModelConfig is one upstream model's policy: which protocols it speaks
 // natively (first entry = default route), the shape of the reasoning item it
 // expects back, and any per-protocol endpoint overrides.
@@ -113,7 +130,11 @@ type Config struct {
 	Protocols   Protocols
 	// Models carries the per-model policy merged from the `models` block and
 	// the legacy `protocol-preference` / `route-overrides` tables.
-	Models           map[string]ModelConfig
+	Models map[string]ModelConfig
+	// ProtocolEndpoints overrides each protocol's default path.
+	ProtocolEndpoints map[string]string
+	// FallbackRoutes resolves a model that `models` does not mention.
+	FallbackRoutes   []FallbackRoute
 	AllowHTTP        bool
 	RequestTimeout   time.Duration
 	MaxResponseBytes int64
@@ -130,6 +151,8 @@ type rawConfig struct {
 	Catalog            rawCatalog                `yaml:"catalog"`
 	Protocols          rawProtocols              `yaml:"protocols"`
 	Models             map[string]rawModelConfig `yaml:"models"`
+	ProtocolEndpoints  map[string]string         `yaml:"protocol-endpoints"`
+	FallbackRoutes     []FallbackRoute           `yaml:"fallback-routes"`
 	RouteOverrides     map[string]RouteOverride  `yaml:"route-overrides"`
 	ProtocolPreference map[string][]string       `yaml:"protocol-preference"`
 	AllowHTTP          bool                      `yaml:"allow-http"`
@@ -217,10 +240,12 @@ func Load(yamlBytes []byte) (Config, error) {
 			Messages:        orDefault(raw.Protocols.Messages, true),
 			Responses:       orDefault(raw.Protocols.Responses, true),
 		},
-		Models:           models,
-		AllowHTTP:        raw.AllowHTTP,
-		RequestTimeout:   requestTimeout,
-		MaxResponseBytes: orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
+		Models:            models,
+		ProtocolEndpoints: protocolEndpoints(raw.ProtocolEndpoints),
+		FallbackRoutes:    fallbackRoutes(raw.FallbackRoutes),
+		AllowHTTP:         raw.AllowHTTP,
+		RequestTimeout:    requestTimeout,
+		MaxResponseBytes:  orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
 	}
 	if raw.CatalogURL != nil {
 		// Mirror the derived-default trim so an explicit trailing-slash
@@ -233,6 +258,39 @@ func Load(yamlBytes []byte) (Config, error) {
 		return Config{}, err
 	}
 	return c, nil
+}
+
+// protocolEndpoints merges operator overrides onto the built-in paths.
+func protocolEndpoints(raw map[string]string) map[string]string {
+	out := make(map[string]string, len(DefaultProtocolEndpoints)+len(raw))
+	for k, v := range DefaultProtocolEndpoints {
+		out[k] = v
+	}
+	for k, v := range raw {
+		key := normalizeProtocol(k)
+		value := strings.TrimSpace(v)
+		if key == "" || value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+// fallbackRoutes normalises the configured prefix table. An empty table is a
+// valid choice: a model that `models` does not mention then has no route and
+// the catalog reports it as unsupported instead of guessing.
+func fallbackRoutes(raw []FallbackRoute) []FallbackRoute {
+	out := make([]FallbackRoute, 0, len(raw))
+	for _, r := range raw {
+		prefix := strings.ToLower(strings.TrimSpace(r.Prefix))
+		proto := normalizeProtocol(r.Protocol)
+		if prefix == "" || proto == "" {
+			continue
+		}
+		out = append(out, FallbackRoute{Prefix: prefix, Protocol: proto})
+	}
+	return out
 }
 
 // mergeModels folds the `models` block and the two legacy tables into one
@@ -378,6 +436,19 @@ func (c Config) validate() error {
 	}
 	if c.MaxResponseBytes <= 0 {
 		return fmt.Errorf("max-response-bytes: must be positive")
+	}
+	for protocol, path := range c.ProtocolEndpoints {
+		if !validProtocols[protocol] {
+			return fmt.Errorf("protocol-endpoints: unsupported protocol %q", protocol)
+		}
+		if !strings.HasPrefix(path, "/") {
+			return fmt.Errorf("protocol-endpoints[%s]: must start with /", protocol)
+		}
+	}
+	for _, r := range c.FallbackRoutes {
+		if !validProtocols[r.Protocol] {
+			return fmt.Errorf("fallback-routes[%s]: unsupported protocol %q", r.Prefix, r.Protocol)
+		}
 	}
 	for name, protocols := range c.Models {
 		if strings.TrimSpace(name) == "" {

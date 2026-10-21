@@ -222,12 +222,22 @@ func pluginConfigFields() []pluginapi.ConfigField {
 		{
 			Name:        "route-overrides",
 			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Explicit route overrides per model (`<model-id>: {protocol: string, endpoint: string}`).",
+			Description: "Legacy: explicit route overrides per model (`<model-id>: {protocol: string, endpoint: string}`). Merged into `models`; prefer `models` for new entries.",
 		},
 		{
-			Name:        "protocol-preference",
+			Name:        "models",
 			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Protocols each model speaks natively (`<model-id>: [chat-completions|responses|messages]`). A client using a listed protocol is passed through unmodified instead of being translated to the model's default route, which preserves Responses-only features (web_search, custom tools).",
+			Description: "Per-model policy (`<model-id>: {protocols: [...], reasoning-shape: summary|content, endpoints: {protocol: path}}`). `protocols` is ordered and the first entry is the default route; a client whose protocol is listed is passed through unmodified. This block replaces protocol-preference and route-overrides.",
+		},
+		{
+			Name:        "protocol-endpoints",
+			Type:        pluginapi.ConfigFieldTypeObject,
+			Description: "Path of each protocol (`chat-completions: /v1/chat/completions`, ...). Change these when the upstream moves an endpoint; the plugin hardcodes nothing.",
+		},
+		{
+			Name:        "fallback-routes",
+			Type:        pluginapi.ConfigFieldTypeArray,
+			Description: "Family prefixes for models the `models` block does not list (`[{prefix: gpt, protocol: responses}, ...]`), first match wins. Empty means no guessing.",
 		},
 		{
 			Name:        "request-timeout",

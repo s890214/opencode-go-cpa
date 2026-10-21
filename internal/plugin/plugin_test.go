@@ -430,7 +430,7 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 		t.Fatalf("schema_version = %d, want %d", reg.SchemaVersion, pluginabi.SchemaVersion)
 	}
 	if reg.Metadata.Name != pluginName || reg.Metadata.Version != pluginVersion ||
-		len(reg.Metadata.ConfigFields) != 11 {
+		len(reg.Metadata.ConfigFields) != 13 {
 		t.Fatalf("metadata wrong: %+v", reg.Metadata)
 	}
 	if !reg.Capabilities.ModelProvider || !reg.Capabilities.AuthProvider {
@@ -498,7 +498,9 @@ func TestRegistrationConfigFields(t *testing.T) {
 		{"catalog", pluginapi.ConfigFieldTypeObject},
 		{"protocols", pluginapi.ConfigFieldTypeObject},
 		{"route-overrides", pluginapi.ConfigFieldTypeObject},
-		{"protocol-preference", pluginapi.ConfigFieldTypeObject},
+		{"models", pluginapi.ConfigFieldTypeObject},
+		{"protocol-endpoints", pluginapi.ConfigFieldTypeObject},
+		{"fallback-routes", pluginapi.ConfigFieldTypeArray},
 		{"request-timeout", pluginapi.ConfigFieldTypeString},
 		{"max-response-bytes", pluginapi.ConfigFieldTypeInteger},
 		{"allow-http", pluginapi.ConfigFieldTypeBoolean},
