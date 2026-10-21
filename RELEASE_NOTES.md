@@ -1,3 +1,68 @@
+## v0.5.1 — protocol hardening across all nine routes
+
+### Routing
+
+- `protocol-endpoints` now applies to a model's default route, not only its
+  pass-through route.
+- Per-model `endpoints` are published as `EndpointPaths`, so a pinned path
+  survives every pass-through decision.
+- `fallback-routes` distinguishes an absent key (use the built-in family
+  table) from an explicit `[]` (do not guess).
+- Every per-protocol endpoint is validated against the base URL, closing the
+  SSRF gap that only covered the default endpoint.
+
+### 400 prevention
+
+- `tool_choice` is never sent without `tools`; `none` fails descriptively on
+  Anthropic targets.
+- Responses `max_output_tokens` is floored at 16, so Claude Desktop's
+  `max_tokens: 1` availability probe no longer 400s.
+- `additional_tools` survives when the client sends no top-level `tools`.
+- `web_search` keeps `filters`, `user_location` and `search_context_size`;
+  only the OpenAI-only `search_content_types` field is removed.
+- Custom tools are wrapped/unwrapped on the Chat leg and restored to
+  `custom_tool_call` on the Responses leg.
+- Orphan tool outputs degrade to user text; malformed historical arguments
+  degrade to `{}`; empty-argument tool calls emit `arguments: "{}"`.
+- System/developer messages are collapsed to the head, `include_usage` is
+  injected, o-series models use `max_completion_tokens`, and Responses→Chat
+  keeps `metadata`, `seed`, `stop`, `response_format` and related fields.
+- Function tools carry `strict: false`, avoiding schema-strictness 400s.
+
+### Reasoning
+
+- Signed Anthropic thinking is bridged into Responses `reasoning` items and
+  restored on the next Claude turn.
+- Responses reasoning items are carried in Anthropic thinking signatures and
+  restored on the next Responses turn.
+- Chat `reasoning_content` becomes a thinking block for Claude clients and a
+  reasoning summary for Responses clients.
+- Unsigned thinking is removed from tool-call assistant turns instead of being
+  replayed into an Anthropic 400.
+- Thinking budgets raise `max_tokens` to `budget + 1024` rather than being
+  clipped to half the output window.
+
+### Streaming and media
+
+- Reasoning deltas and reasoning output items are emitted on all conversion
+  legs; empty deltas are skipped.
+- Empty-argument tool calls are announced at `content_block_stop`.
+- Document blocks become `input_file`; images inside `tool_result` become
+  `input_image` instead of failing as text-only.
+- Bare `sk-...` values are covered by error redaction.
+
+### Verification
+
+- `go test ./...` and `go vet ./...` pass.
+- Full live suite against the real OpenCode Go upstream: 18/18 3×3
+  non-stream/stream smoke cases, plus tool calling, reasoning, Codex tools,
+  error propagation, multipart tool output and session affinity.
+
+### Upgrade
+
+- Replace the plugin binary and restart CLIProxyAPI.
+- No configuration change is required.
+
 ## v0.5.0 — one config table, pass-through that really passes through
 
 ### Per-model policy replaces two overlapping tables
