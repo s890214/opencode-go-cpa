@@ -202,7 +202,12 @@ func pluginConfigFields() []pluginapi.ConfigField {
 		{
 			Name:        "catalog-url",
 			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Optional catalog discovery URL (default: {base-url}/models).",
+			Description: "Catalog discovery URL (default: {base-url}/v1/models).",
+		},
+		{
+			Name:        "quota-path",
+			Type:        pluginapi.ConfigFieldTypeString,
+			Description: "Path of the usage endpoint relative to base-url (default: /v1/usage).",
 		},
 		{
 			Name:        "model-prefix",
@@ -233,11 +238,6 @@ func pluginConfigFields() []pluginapi.ConfigField {
 			Name:        "protocol-endpoints",
 			Type:        pluginapi.ConfigFieldTypeObject,
 			Description: "Path of each protocol (`chat-completions: /v1/chat/completions`, ...). Change these when the upstream moves an endpoint; the plugin hardcodes nothing.",
-		},
-		{
-			Name:        "quota-path",
-			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Path of the usage endpoint relative to base-url (default: /v1/usage).",
 		},
 		{
 			Name:        "fallback-routes",
