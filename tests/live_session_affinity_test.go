@@ -248,9 +248,32 @@ func assertSessionLine(t *testing.T, line, sourceFormat, wantHash string, stream
 		mode = "stream"
 	}
 	want := fmt.Sprintf("executor session mode=%s source_format=%s x_opencode_session=%s fallback=%t", mode, sourceFormat, wantHash, fallback)
-	if !strings.Contains(line, want) {
-		t.Fatalf("session debug line = %q, want it to contain %q", line, want)
+	if strings.Contains(line, want) {
+		return
 	}
+	// CPA v8 supplies canonical_session_id in executor metadata, which takes
+	// precedence over the plugin's content hash. The host identity is a
+	// derived:ctx:v1:<64-hex> value; the content-hash fallback remains
+	// covered by the unit tests and is only used when metadata is absent.
+	if !fallback {
+		if idx := strings.Index(line, "x_opencode_session=derived:ctx:v1:"); idx >= 0 {
+			rest := line[idx+len("x_opencode_session=derived:ctx:v1:"):]
+			hash := strings.Fields(rest)
+			if len(hash) > 0 && len(hash[0]) == 64 && isLowerHex(hash[0]) {
+				return
+			}
+		}
+	}
+	t.Fatalf("session debug line = %q, want it to contain %q", line, want)
+}
+
+func isLowerHex(s string) bool {
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func sessionHash(value string) string {

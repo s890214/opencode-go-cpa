@@ -984,3 +984,69 @@ func TestEndpointCannotEscapeConfiguredHost(t *testing.T) {
 		}
 	}
 }
+
+func TestSwapUsesConfiguredProtocolEndpointForDefaultRoute(t *testing.T) {
+	cfg := testCfg()
+	cfg.BaseURL = "https://example.com"
+	cfg.ProtocolEndpoints = map[string]string{
+		"chat-completions": "/openai/v1/chat/completions",
+		"messages":         "/anthropic/v1/messages",
+		"responses":        "/openai/v1/responses",
+	}
+	cfg.Models = map[string]config.ModelConfig{
+		"claude-haiku-5-5": {Protocols: []string{"messages"}},
+	}
+	m := newManager(cfg, nil)
+	m.swap([]rawModel{{ID: "claude-haiku-5-5"}})
+	rec := findModel(t, m.Models(), "claude-haiku-5-5")
+	if rec.EndpointPath != "/anthropic/v1/messages" {
+		t.Errorf("default-route endpoint = %q, want configured /anthropic/v1/messages", rec.EndpointPath)
+	}
+}
+
+func TestSwapPublishesPerProtocolEndpointOverrides(t *testing.T) {
+	cfg := testCfg()
+	cfg.BaseURL = "https://example.com"
+	cfg.ProtocolEndpoints = map[string]string{
+		"chat-completions": "/openai/v1/chat/completions",
+		"messages":         "/anthropic/v1/messages",
+		"responses":        "/openai/v1/responses",
+	}
+	cfg.Models = map[string]config.ModelConfig{
+		"m1": {
+			Protocols: []string{"chat-completions", "responses"},
+			Endpoints: map[string]string{"responses": "/openai/v1/custom-responses"},
+		},
+	}
+	m := newManager(cfg, nil)
+	m.swap([]rawModel{{ID: "m1"}})
+	rec := findModel(t, m.Models(), "m1")
+	if got := rec.EndpointPaths["responses"]; got != "/openai/v1/custom-responses" {
+		t.Errorf("EndpointPaths[responses] = %q", got)
+	}
+	if got := rec.EndpointPaths["chat-completions"]; got != "/openai/v1/chat/completions" {
+		t.Errorf("EndpointPaths[chat-completions] = %q", got)
+	}
+}
+
+func TestFallbackRoutesEmptyDisablesGuessing(t *testing.T) {
+	cfg := testCfg()
+	cfg.BaseURL = "https://example.com"
+	cfg.FallbackRoutes = []config.FallbackRoute{} // explicit empty
+	m := newManager(cfg, nil)
+	m.swap([]rawModel{{ID: "glm-99"}})
+	if got := len(m.Models()); got != 0 {
+		t.Fatalf("explicit empty fallback-routes still routed %d model(s)", got)
+	}
+}
+
+func TestFallbackRoutesNilUsesBuiltinTable(t *testing.T) {
+	cfg := testCfg()
+	cfg.BaseURL = "https://example.com"
+	m := newManager(cfg, nil)
+	m.swap([]rawModel{{ID: "glm-99"}})
+	rec := findModel(t, m.Models(), "glm-99")
+	if rec.Protocol != RouteChatCompletions {
+		t.Errorf("nil fallback-routes route = %q, want chat-completions", rec.Protocol)
+	}
+}

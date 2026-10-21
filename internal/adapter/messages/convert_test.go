@@ -363,33 +363,37 @@ func TestConvertMessagesToolUseAbsentInput(t *testing.T) {
 	}
 }
 
-func TestConvertMessagesToResponsesThinkingOmitted(t *testing.T) {
+func TestConvertMessagesToResponsesThinkingPreserved(t *testing.T) {
 	out, eErr := ConvertNonStreamResponse("openai-response", 200, []byte(claudeThinking))
 	if eErr != nil {
 		t.Fatalf("convert: %v", eErr)
 	}
-	if !strings.Contains(string(out), `"text":"answer"`) || strings.Contains(string(out), "thinking") {
-		t.Fatalf("thinking leaked or text lost: %s", out)
+	s := string(out)
+	if !strings.Contains(s, `"text":"answer"`) || !strings.Contains(s, `"type":"reasoning"`) ||
+		!strings.Contains(s, `"summary"`) {
+		t.Fatalf("thinking summary or text lost: %s", out)
 	}
 }
 
-// redacted_thinking is pure encrypted reasoning metadata with no
-// representable payload; like thinking it is omitted (FR-005) instead of
-// failing conversion, matching the stream path. Content-bearing unknown
-// block types still error (see TestConvertMessagesUnknownBlockType).
-func TestConvertMessagesRedactedThinkingOmitted(t *testing.T) {
+// redacted_thinking is carried as a reasoning item on Responses targets and
+// as reasoning_content on Chat targets; neither path drops the signal.
+func TestConvertMessagesRedactedThinkingPreserved(t *testing.T) {
 	body := `{"id":"m_5","type":"message","role":"assistant","model":"qwen3.7-max",` +
 		`"content":[{"type":"redacted_thinking","data":"encrypted-blob"},{"type":"text","text":"answer"}],` +
 		`"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":3}}`
-	for _, format := range []string{"openai", "openai-response"} {
-		out, eErr := ConvertNonStreamResponse(format, 200, []byte(body))
-		if eErr != nil {
-			t.Fatalf("%s: convert: %v", format, eErr)
-		}
-		if !strings.Contains(string(out), `"answer"`) ||
-			strings.Contains(string(out), "redacted") || strings.Contains(string(out), "encrypted") {
-			t.Fatalf("%s: redacted_thinking leaked or text lost: %s", format, out)
-		}
+	out, eErr := ConvertNonStreamResponse("openai", 200, []byte(body))
+	if eErr != nil {
+		t.Fatalf("openai: convert: %v", eErr)
+	}
+	if !strings.Contains(string(out), `"answer"`) || !strings.Contains(string(out), `"[redacted thinking]"`) {
+		t.Fatalf("openai: redacted_thinking lost: %s", out)
+	}
+	out, eErr = ConvertNonStreamResponse("openai-response", 200, []byte(body))
+	if eErr != nil {
+		t.Fatalf("openai-response: convert: %v", eErr)
+	}
+	if !strings.Contains(string(out), `"answer"`) || !strings.Contains(string(out), `"type":"reasoning"`) {
+		t.Fatalf("openai-response: redacted_thinking lost: %s", out)
 	}
 }
 

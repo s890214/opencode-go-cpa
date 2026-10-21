@@ -211,7 +211,7 @@ func TestStreamOpenAIFullFlow(t *testing.T) {
 	}
 	joined := strings.Join(mapJoin(events), "")
 	if strings.Contains(joined, "hush") {
-		t.Error("thinking_delta leaked into openai stream (explicit-omission policy)")
+		t.Error("malformed thinking_delta on a text block leaked")
 	}
 	frames := dataFrames(t, events)
 	if len(frames) != 6 { // role, text, frag_a×2, frag_b, finish+usage
@@ -592,18 +592,20 @@ func TestStreamResponsesLeadingThinkingCompactedOutputIndexes(t *testing.T) {
 	if eErr != nil || !done {
 		t.Fatalf("done=%v err=%v", done, eErr)
 	}
-	if strings.Contains(strings.Join(mapJoin(events), ""), "hush") {
-		t.Fatal("thinking leaked into responses stream (FR-005 omission policy)")
+	if strings.Contains(strings.Join(mapJoin(events), ""), "hush") == false {
+		t.Fatal("thinking was dropped from responses stream")
 	}
 	completed := namedEvents(t, events)["response.completed"][0]["response"].(map[string]any)
 	output, ok := completed["output"].([]any)
-	if !ok || len(output) != 2 {
+	if !ok || len(output) != 3 {
 		t.Fatalf("terminal output = %T %v", completed["output"], completed["output"])
 	}
-	idAt := make([]string, len(output)) // item identity per compacted position
+	idAt := make([]string, len(output)) // item identity per output position
 	for i, it := range output {
 		m := it.(map[string]any)
 		switch m["type"] {
+		case "reasoning":
+			idAt[i] = m["id"].(string)
 		case "message":
 			idAt[i] = m["id"].(string)
 		case "function_call":
@@ -621,17 +623,18 @@ func TestStreamResponsesLeadingThinkingCompactedOutputIndexes(t *testing.T) {
 		t.Fatalf("item %q missing from terminal output %v", id, idAt)
 		return -1
 	}
-	msgPos, callPos := positionOf("msg_t"), positionOf("call_1")
-	if msgPos != 0 || callPos != 1 {
-		t.Fatalf("compacted layout = %v", idAt)
+	reasonPos, msgPos, callPos := positionOf("msg_t-rs-0"), positionOf("msg_t"), positionOf("call_1")
+	if reasonPos != 0 || msgPos != 1 || callPos != 2 {
+		t.Fatalf("output layout = %v", idAt)
 	}
 	byName := namedEvents(t, events)
 	added := byName["response.output_item.added"]
-	if len(added) != 2 ||
-		added[0]["output_index"] != float64(msgPos) ||
-		added[1]["output_index"] != float64(callPos) {
-		t.Fatalf("announcements must reference terminal positions %d/%d: %v %v",
-			msgPos, callPos, added[0], added[1])
+	if len(added) != 3 ||
+		added[0]["output_index"] != float64(reasonPos) ||
+		added[1]["output_index"] != float64(msgPos) ||
+		added[2]["output_index"] != float64(callPos) {
+		t.Fatalf("announcements must reference terminal positions %d/%d/%d: %v %v %v",
+			reasonPos, msgPos, callPos, added[0], added[1], added[2])
 	}
 	if td := byName["response.output_text.delta"][0]; td["output_index"] != float64(msgPos) {
 		t.Errorf("text delta output_index = %v, want %v", td["output_index"], msgPos)

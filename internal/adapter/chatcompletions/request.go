@@ -204,18 +204,52 @@ type ccMessage struct {
 	ToolCallID       string  `json:"tool_call_id,omitempty"`
 }
 
+type ccStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 type ccRequest struct {
-	Model             string          `json:"model"`
-	Messages          []ccMessage     `json:"messages"`
-	MaxTokens         *int64          `json:"max_tokens,omitempty"`
-	Stop              any             `json:"stop,omitempty"`
-	Stream            bool            `json:"stream,omitempty"`
-	Temperature       *float64        `json:"temperature,omitempty"`
-	TopP              *float64        `json:"top_p,omitempty"`
-	ReasoningEffort   string          `json:"reasoning_effort,omitempty"`
-	Tools             []shared.CCTool `json:"tools,omitempty"`
-	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+	Model               string           `json:"model"`
+	Messages            []ccMessage      `json:"messages"`
+	MaxTokens           *int64           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int64           `json:"max_completion_tokens,omitempty"`
+	Stop                any              `json:"stop,omitempty"`
+	Stream              bool             `json:"stream,omitempty"`
+	StreamOptions       *ccStreamOptions `json:"stream_options,omitempty"`
+	Temperature         *float64         `json:"temperature,omitempty"`
+	TopP                *float64         `json:"top_p,omitempty"`
+	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
+	Tools               []shared.CCTool  `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage  `json:"tool_choice,omitempty"`
+	ParallelToolCalls   *bool            `json:"parallel_tool_calls,omitempty"`
+}
+
+// isOpenAIOSeries mirrors the o-series check used by CC Switch: a model name
+// starting with "o" followed by a digit uses max_completion_tokens instead
+// of max_tokens.
+func isOpenAIOSeries(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	return len(m) > 1 && m[0] == 'o' && m[1] >= '0' && m[1] <= '9'
+}
+
+// setMaxTokens assigns the token cap to the field the target model expects.
+func setMaxTokens(req *ccRequest, model string, n int64) {
+	if n <= 0 {
+		return
+	}
+	if isOpenAIOSeries(model) {
+		req.MaxCompletionTokens = &n
+		return
+	}
+	req.MaxTokens = &n
+}
+
+// enableStreamUsage asks OpenAI-compatible upstreams to emit the terminal
+// usage chunk; many only do so when include_usage is explicit.
+func enableStreamUsage(req *ccRequest) {
+	if req.Stream {
+		req.StreamOptions = &ccStreamOptions{IncludeUsage: true}
+	}
 }
 
 // encode finalizes and encodes a translated request; the composed types
@@ -252,16 +286,16 @@ func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSuppo
 		Temperature: src.Temperature,
 		TopP:        src.TopP,
 	}
-	out.MaxTokens = &src.MaxTokens
+	setMaxTokens(out, upstreamModel, src.MaxTokens)
 	if len(src.StopSequences) > 0 {
 		out.Stop = src.StopSequences
 	}
 	if shared.ThinkingEnabled(src.Thinking) {
 		out.ReasoningEffort = thinking.EffortFromBudget(src.Thinking.BudgetTokens, ts)
 	}
-	applyToolChoiceCC(out, src.ToolChoiceKind, src.ToolChoiceName)
+	var systemTexts []string
 	if src.System != "" {
-		out.Messages = append(out.Messages, ccMessage{Role: "system", Content: src.System})
+		systemTexts = append(systemTexts, src.System)
 	}
 	for i := range src.Messages {
 		m := &src.Messages[i]
@@ -295,11 +329,14 @@ func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSuppo
 				}
 			}
 			if sb.Len() > 0 {
-				out.Messages = append(out.Messages, ccMessage{Role: "system", Content: sb.String()})
+				systemTexts = append(systemTexts, sb.String())
 			}
 		default:
 			return nil, shared.ValidateRole(m.Role, EndpointPath)
 		}
+	}
+	if len(systemTexts) > 0 {
+		out.Messages = append([]ccMessage{{Role: "system", Content: strings.Join(systemTexts, "\n\n")}}, out.Messages...)
 	}
 	for _, t := range src.Tools {
 		// Claude tools carry no type field; validation cannot reject here.
@@ -309,6 +346,8 @@ func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSuppo
 			Function: shared.CCFunction{Name: t.Name, Description: t.Description, Parameters: schema},
 		})
 	}
+	applyToolChoiceCC(out, src.ToolChoiceKind, src.ToolChoiceName)
+	enableStreamUsage(out)
 	return encode(out), nil
 }
 
@@ -435,14 +474,15 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 		ParallelToolCalls: src.ParallelToolCalls,
 	}
 	if src.MaxOutputTokens != nil && *src.MaxOutputTokens > 0 {
-		out.MaxTokens = src.MaxOutputTokens
+		setMaxTokens(out, upstreamModel, *src.MaxOutputTokens)
 	}
 	if src.Reasoning != nil && src.Reasoning.Effort != "" {
 		out.ReasoningEffort = strings.ToLower(strings.TrimSpace(src.Reasoning.Effort))
 	}
+	var systemTexts []string
 	addSystem := func(text string) {
 		if text != "" {
-			out.Messages = append(out.Messages, ccMessage{Role: "system", Content: text})
+			systemTexts = append(systemTexts, text)
 		}
 	}
 	instr, eErr := src.DecodeInstructions()
@@ -459,7 +499,7 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 	if eErr != nil {
 		return nil, eErr
 	}
-	applyToolChoiceCC(out, kind, tcName)
+	knownCalls := make(map[string]struct{})
 	var pendingReasoning string
 	var hasPendingReasoning bool
 	for _, item := range items {
@@ -494,17 +534,39 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			default:
 				return nil, shared.ValidateRole(item.Role, EndpointPath)
 			}
-		case "function_call", "custom_tool_call":
-			args := item.Arguments
-			if args == "" && item.Input != "" {
-				args = item.Input
-			}
+		case "function_call":
+			knownCalls[item.CallID] = struct{}{}
+			args := shared.DefaultArgs(item.Arguments)
 			tc := shared.CCToolCall{ID: item.CallID, Type: "function"}
 			tc.Function.Name = item.Name
-			tc.Function.Arguments = shared.DefaultArgs(args)
+			tc.Function.Arguments = args
 			reasoning := toolCallReasoning(tools, item.CallID, pendingReasoning, hasPendingReasoning)
 			// Merge consecutive function_call items into one
 			// assistant message so multi-call turns round-trip.
+			if n := len(out.Messages); n > 0 {
+				last := &out.Messages[n-1]
+				if last.Role == "assistant" && last.Content == nil {
+					last.ToolCalls = append(last.ToolCalls, tc)
+					if last.ReasoningContent == nil {
+						last.ReasoningContent = reasoning
+					}
+					continue
+				}
+			}
+			out.Messages = append(out.Messages, ccMessage{
+				Role: "assistant", ToolCalls: []shared.CCToolCall{tc},
+				ReasoningContent: reasoning,
+			})
+		case "custom_tool_call":
+			knownCalls[item.CallID] = struct{}{}
+			input := item.Input
+			if input == "" {
+				input = item.Arguments
+			}
+			tc := shared.CCToolCall{ID: item.CallID, Type: "function"}
+			tc.Function.Name = item.Name
+			tc.Function.Arguments = shared.WrapCustomToolInput(input)
+			reasoning := toolCallReasoning(tools, item.CallID, pendingReasoning, hasPendingReasoning)
 			if n := len(out.Messages); n > 0 {
 				last := &out.Messages[n-1]
 				if last.Role == "assistant" && last.Content == nil {
@@ -524,9 +586,18 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			if eErr != nil {
 				return nil, eErr
 			}
-			out.Messages = append(out.Messages, ccMessage{
-				Role: "tool", Content: text, ToolCallID: item.CallID,
-			})
+			if _, ok := knownCalls[item.CallID]; !ok {
+				// Orphan result: a tool message without a preceding
+				// tool_calls entry is rejected by strict backends. Degrade
+				// it to user text so the conversation still works.
+				out.Messages = append(out.Messages, ccMessage{
+					Role: "user", Content: "[tool result without a matching call] " + text,
+				})
+			} else {
+				out.Messages = append(out.Messages, ccMessage{
+					Role: "tool", Content: text, ToolCallID: item.CallID,
+				})
+			}
 			// Tool output closes the turn: a reasoning item that follows
 			// belongs to the next one.
 			pendingReasoning, hasPendingReasoning = "", false
@@ -542,6 +613,10 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 		}
 	}
 
+	if len(systemTexts) > 0 {
+		out.Messages = append([]ccMessage{{Role: "system", Content: strings.Join(systemTexts, "\n\n")}}, out.Messages...)
+	}
+
 	for _, t := range src.Tools {
 		if eErr := shared.FunctionTool(t.Type, EndpointPath); eErr != nil {
 			return nil, eErr
@@ -552,7 +627,72 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			Function: shared.CCFunction{Name: t.Name, Description: t.Description, Parameters: schema},
 		})
 	}
-	return encode(out), nil
+	applyToolChoiceCC(out, kind, tcName)
+	enableStreamUsage(out)
+	encoded := mergeChatExtras(encode(out), body)
+	return injectIncludeUsage(encoded, out.Stream), nil
+}
+
+// chatPassthroughFields are Responses-side knobs that have a direct Chat
+// Completions equivalent. They are copied after the typed conversion so a
+// strict upstream keeps behavior the client asked for.
+var chatPassthroughFields = []string{
+	"frequency_penalty", "logit_bias", "logprobs", "metadata", "n",
+	"presence_penalty", "response_format", "seed", "service_tier", "stop",
+	"top_logprobs", "user",
+}
+
+func mergeChatExtras(encoded, source []byte) []byte {
+	var dst map[string]json.RawMessage
+	if json.Unmarshal(encoded, &dst) != nil {
+		return encoded
+	}
+	var src map[string]json.RawMessage
+	if json.Unmarshal(source, &src) != nil {
+		return encoded
+	}
+	changed := false
+	for _, key := range chatPassthroughFields {
+		if raw, ok := src[key]; ok {
+			dst[key] = raw
+			changed = true
+		}
+	}
+	if !changed {
+		return encoded
+	}
+	out, err := json.Marshal(dst)
+	if err != nil {
+		return encoded
+	}
+	return out
+}
+
+// injectIncludeUsage sets stream_options.include_usage on an already
+// encoded request, preserving any other stream_options the client sent.
+func injectIncludeUsage(encoded []byte, stream bool) []byte {
+	if !stream {
+		return encoded
+	}
+	var dst map[string]json.RawMessage
+	if json.Unmarshal(encoded, &dst) != nil {
+		return encoded
+	}
+	opts := map[string]json.RawMessage{}
+	if raw, ok := dst["stream_options"]; ok {
+		_ = json.Unmarshal(raw, &opts)
+	}
+	opts["include_usage"] = json.RawMessage("true")
+	b, err := json.Marshal(opts)
+	if err != nil {
+		return encoded
+	}
+	dst["stream_options"] = b
+	out, err := json.Marshal(dst)
+	if err != nil {
+		return encoded
+	}
+	return out
 }
 
 // respItemReasoning extracts the thinking text carried by a Responses
@@ -612,6 +752,10 @@ func respContent(raw json.RawMessage) (any, *errclass.Error) {
 // exhaustiveness test in request_test.go enforces this against
 // shared.AllToolChoiceKinds); absent omits the field.
 func applyToolChoiceCC(req *ccRequest, kind, name string) {
+	if len(req.Tools) == 0 {
+		// OpenAI-compatible backends reject tool_choice without tools.
+		return
+	}
 	switch kind {
 	case shared.ToolChoiceAuto:
 		req.ToolChoice = json.RawMessage(`"auto"`)

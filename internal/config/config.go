@@ -303,6 +303,12 @@ func protocolEndpoints(raw map[string]string) map[string]string {
 // valid choice: a model that `models` does not mention then has no route and
 // the catalog reports it as unsupported instead of guessing.
 func fallbackRoutes(raw []FallbackRoute) []FallbackRoute {
+	if raw == nil {
+		// Absent key: keep nil so the catalog can fall back to its built-in
+		// family table. An explicit `fallback-routes: []` stays empty and
+		// disables guessing, matching the documented contract.
+		return nil
+	}
 	out := make([]FallbackRoute, 0, len(raw))
 	for _, r := range raw {
 		prefix := strings.ToLower(strings.TrimSpace(r.Prefix))

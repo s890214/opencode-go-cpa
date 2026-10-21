@@ -22,11 +22,13 @@ type respTextPart struct {
 }
 
 type respOutputItem struct {
-	Type      string         `json:"type"` // message | function_call | ...
-	CallID    string         `json:"call_id"`
-	Name      string         `json:"name"`
-	Arguments string         `json:"arguments"`
-	Content   []respTextPart `json:"content"`
+	Type             string         `json:"type"` // message | function_call | reasoning | ...
+	CallID           string         `json:"call_id"`
+	Name             string         `json:"name"`
+	Arguments        string         `json:"arguments"`
+	Content          []respTextPart `json:"content"`
+	Summary          []respTextPart `json:"summary"`
+	EncryptedContent string         `json:"encrypted_content"`
 }
 
 type respUsageIn struct {
@@ -174,8 +176,24 @@ func responsesToChat(body []byte) ([]byte, *errclass.Error) {
 			msg.ToolCalls = append(msg.ToolCalls, tc)
 			sawToolCall = true
 		case "reasoning":
-			// Reasoning summaries have no Chat Completions equivalent and
-			// are omitted per the FR-005/FR-006 compatibility policy.
+			// Chat Completions has no standard reasoning field; DeepSeek/
+			// MiMo clients read reasoning_content. Prefer bridge-owned
+			// thinking, then the visible summary text.
+			if block, ok := shared.DecodeThinkingBlock(item.EncryptedContent); ok {
+				if thinking, _ := block["thinking"].(string); thinking != "" {
+					msg.ReasoningContent = thinking
+				}
+			} else {
+				summary := make([]string, 0, len(item.Summary))
+				for _, part := range item.Summary {
+					if part.Text != "" {
+						summary = append(summary, part.Text)
+					}
+				}
+				if len(summary) > 0 {
+					msg.ReasoningContent = strings.Join(summary, "\n")
+				}
+			}
 		default:
 			if respItemCarriesPayload(item) {
 				return nil, errclass.Translation(fmt.Sprintf(
@@ -250,8 +268,22 @@ func responsesToClaude(body []byte) ([]byte, *errclass.Error) {
 			})
 			sawToolCall = true
 		case "reasoning":
-			// Reasoning summaries have no Messages equivalent and are
-			// omitted per the FR-005/FR-006 compatibility policy.
+			// Bridge-owned signed thinking is replayable; a plain summary
+			// is still rendered as visible thinking without a signature.
+			if block, ok := shared.DecodeThinkingBlock(item.EncryptedContent); ok {
+				blocks = append(blocks, block)
+				continue
+			}
+			reasoning := shared.RespItem{Type: "reasoning", EncryptedContent: item.EncryptedContent}
+			for _, part := range item.Summary {
+				reasoning.Summary = append(reasoning.Summary, struct {
+					Type string `json:"type,omitempty"`
+					Text string `json:"text"`
+				}{Type: "summary_text", Text: part.Text})
+			}
+			if block, ok := shared.ThinkingBlockFromOpenAIReasoning(reasoning); ok {
+				blocks = append(blocks, block)
+			}
 		default:
 			if respItemCarriesPayload(item) {
 				return nil, errclass.Translation(fmt.Sprintf(

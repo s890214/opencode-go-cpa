@@ -299,34 +299,47 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 	// verbatim (measured 200 / custom_tool_call), so nothing needs rewriting.
 	//
 	// The one exception is web_search: its search_content_types field is an
-	// OpenAI-only knob the upstream rejects, so that entry is reduced to
-	// {"type":"web_search"}.
+	// OpenAI-only knob the upstream rejects, so only that field is removed;
+	// filters/user_location/search_context_size stay intact.
+	entries := make([]json.RawMessage, 0)
 	if rawTools, ok := raw["tools"]; ok && len(rawTools) > 0 {
-		var entries []json.RawMessage
-		if err := json.Unmarshal(rawTools, &entries); err == nil {
-			changed := false
-			for i, entry := range entries {
-				var meta struct {
-					Type string `json:"type"`
-				}
-				_ = json.Unmarshal(entry, &meta)
-				if meta.Type != "web_search" {
-					continue
-				}
-				if trimmed, _ := json.Marshal(map[string]string{"type": "web_search"}); string(trimmed) != string(entry) {
-					entries[i] = trimmed
-					changed = true
-				}
-			}
-			for _, extra := range extraTools {
-				entries = append(entries, extra)
-				changed = true
-			}
-			if changed {
-				if b, err := json.Marshal(entries); err == nil {
-					raw["tools"] = b
-				}
-			}
+		if err := json.Unmarshal(rawTools, &entries); err != nil {
+			return nil, errclass.Translation("tools must be an array")
+		}
+	}
+	changed := false
+	for i, entry := range entries {
+		var meta struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(entry, &meta)
+		if meta.Type == "custom" && meta.Name != "" {
+			shared.ResponseToolContext(tools).RegisterCustomTool(meta.Name)
+		}
+		if meta.Type != "web_search" {
+			continue
+		}
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(entry, &obj) != nil {
+			continue
+		}
+		if _, ok := obj["search_content_types"]; !ok {
+			continue
+		}
+		delete(obj, "search_content_types")
+		if b, err := json.Marshal(obj); err == nil {
+			entries[i] = b
+			changed = true
+		}
+	}
+	if len(extraTools) > 0 {
+		entries = append(entries, extraTools...)
+		changed = true
+	}
+	if changed {
+		if b, err := json.Marshal(entries); err == nil {
+			raw["tools"] = b
 		}
 	}
 
@@ -354,6 +367,7 @@ type responsesEnvelope struct {
 	Instructions      string            `json:"instructions,omitempty"`
 	Tools             []shared.RespTool `json:"tools,omitempty"`
 	ToolChoice        json.RawMessage   `json:"tool_choice,omitempty"`
+	MaxToolCalls      *int              `json:"max_tool_calls,omitempty"`
 	ParallelToolCalls *bool             `json:"parallel_tool_calls,omitempty"`
 	Reasoning         map[string]any    `json:"reasoning,omitempty"`
 	MaxOutputTokens   *int64            `json:"max_output_tokens,omitempty"`
@@ -456,11 +470,12 @@ func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.Thinki
 	if eErr != nil {
 		return nil, eErr
 	}
-	req.ToolChoice = respToolChoice(kind, tcName)
 	if src.MaxTokens != nil && *src.MaxTokens > 0 {
-		req.MaxOutputTokens = src.MaxTokens
+		v := shared.ResponsesMaxOutputTokens(*src.MaxTokens)
+		req.MaxOutputTokens = &v
 	} else if src.MaxCompletionTokens != nil && *src.MaxCompletionTokens > 0 {
-		req.MaxOutputTokens = src.MaxCompletionTokens
+		v := shared.ResponsesMaxOutputTokens(*src.MaxCompletionTokens)
+		req.MaxOutputTokens = &v
 	}
 	if src.ReasoningEffort != "" {
 		norm := strings.ToLower(strings.TrimSpace(src.ReasoningEffort))
@@ -546,12 +561,19 @@ func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.Thinki
 		if eErr := shared.FunctionTool(t.Type, EndpointPath); eErr != nil {
 			return nil, eErr
 		}
+		strict := false
 		req.Tools = append(req.Tools, shared.RespTool{
 			Type:        "function",
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
 			Parameters:  shared.ObjectSchema(t.Function.Parameters),
+			Strict:      &strict,
 		})
+	}
+	if len(req.Tools) > 0 {
+		req.ToolChoice = respToolChoice(kind, tcName)
+	} else {
+		req.ParallelToolCalls = nil
 	}
 	b, _ := json.Marshal(req) // only marshallable composed types; cannot fail
 	return b, nil
@@ -608,12 +630,11 @@ func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.Thinkin
 	}
 	req := &responsesEnvelope{
 		Model:           upstreamModel,
-		MaxOutputTokens: &src.MaxTokens,
+		MaxOutputTokens: func() *int64 { v := shared.ResponsesMaxOutputTokens(src.MaxTokens); return &v }(),
 		Stream:          src.Stream,
 		Temperature:     src.Temperature,
 		TopP:            src.TopP,
 	}
-	req.ToolChoice = respToolChoice(src.ToolChoiceKind, src.ToolChoiceName)
 	if shared.ThinkingEnabled(src.Thinking) {
 		if effort, ok := reasoningEffortFor(thinking.EffortFromBudget(src.Thinking.BudgetTokens, ts), ts); ok {
 			req.Reasoning = map[string]any{"effort": effort}
@@ -670,6 +691,21 @@ func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.Thinkin
 				parts = append(parts, textPart(m.Role, blk.Text))
 			case "image":
 				parts = append(parts, imagePart(blk.URL))
+			case "document":
+				if doc, ok := documentPart(blk); ok {
+					parts = append(parts, doc)
+				}
+			case "thinking", "redacted_thinking":
+				// A Claude client replaying bridge-owned reasoning restores
+				// the original Responses reasoning item; native Anthropic
+				// thinking has no OpenAI ciphertext and is dropped.
+				block := map[string]any{"type": blk.Kind, "thinking": blk.Thinking, "signature": blk.Signature, "data": blk.Data}
+				if item, ok := shared.OpenAIReasoningFromThinkingBlock(block); ok {
+					flush()
+					req.Input = append(req.Input, reasoningItem(item))
+					thinkText = shared.ReasoningSummaryText(item)
+					reasoningEmitted = true
+				}
 			case "tool_use":
 				flush()
 				args := shared.DefaultArgs(string(blk.Input))
@@ -688,12 +724,9 @@ func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.Thinkin
 				})
 			case "tool_result":
 				flush()
-				output, eErr := shared.ToolResultText(blk.Result, "function_call_output carries text only")
+				output, eErr := claudeToolResultOutput(blk.Result, blk.IsError)
 				if eErr != nil {
 					return nil, eErr
-				}
-				if blk.IsError {
-					output = shared.ToolResultErrorPrefix + output
 				}
 				req.Input = append(req.Input, map[string]any{
 					"type":    "function_call_output",
@@ -701,10 +734,6 @@ func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.Thinkin
 					"output":  output,
 				})
 				reasoningEmitted = false
-			case "thinking":
-				thinkText = blk.Text
-			case "redacted_thinking":
-				// omitted: encrypted metadata with no readable equivalent
 			default:
 				flush()
 				return nil, shared.UnsupportedPartType(blk.Kind, EndpointPath)
@@ -713,17 +742,119 @@ func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.Thinkin
 		flush()
 	}
 
+	maxUses := 0
 	for _, t := range src.Tools {
+		// Claude server-side search tools map to the Responses hosted tool,
+		// not to a function with an empty schema.
+		if strings.HasPrefix(t.Type, "web_search") {
+			tool := shared.RespTool{Type: "web_search"}
+			if len(t.AllowedDomains) > 0 {
+				b, _ := json.Marshal(map[string]any{"allowed_domains": t.AllowedDomains})
+				tool.Filters = b
+			}
+			if t.MaxUses > 0 && (maxUses == 0 || t.MaxUses < maxUses) {
+				maxUses = t.MaxUses
+			}
+			if len(t.UserLocation) > 0 {
+				tool.UserLocation = t.UserLocation
+			}
+			req.Tools = append(req.Tools, tool)
+			continue
+		}
 		// Claude tools carry no type field (validation cannot reject here).
+		strict := false
 		req.Tools = append(req.Tools, shared.RespTool{
 			Type:        "function",
 			Name:        t.Name,
 			Description: t.Description,
 			Parameters:  shared.ObjectSchema(t.InputSchema),
+			Strict:      &strict,
 		})
+	}
+	if len(req.Tools) > 0 {
+		req.ToolChoice = respToolChoice(src.ToolChoiceKind, src.ToolChoiceName)
+	}
+	if maxUses > 0 {
+		req.MaxToolCalls = &maxUses
 	}
 	b, _ := json.Marshal(req) // only marshallable composed types; cannot fail
 	return b, nil
+}
+
+// claudeToolResultOutput renders an Anthropic tool_result as Responses
+// function_call_output: a string when text-only, a content-part array when
+// the result carries images. The old text-only path rejected screenshots.
+func claudeToolResultOutput(raw json.RawMessage, isError bool) (any, *errclass.Error) {
+	parts, eErr := shared.ToolResultParts(raw)
+	if eErr != nil {
+		return nil, eErr
+	}
+	var text strings.Builder
+	blocks := make([]map[string]any, 0, len(parts))
+	hasImage := false
+	for _, part := range parts {
+		if part.ImageURL != "" {
+			blocks = append(blocks, map[string]any{"type": "input_image", "image_url": part.ImageURL})
+			hasImage = true
+			continue
+		}
+		text.WriteString(part.Text)
+		blocks = append(blocks, map[string]any{"type": "input_text", "text": part.Text})
+	}
+	if !hasImage {
+		out := text.String()
+		if isError {
+			out = shared.ToolResultErrorPrefix + out
+		}
+		return out, nil
+	}
+	if isError {
+		blocks = append([]map[string]any{{"type": "input_text", "text": shared.ToolResultErrorPrefix}}, blocks...)
+	}
+	return blocks, nil
+}
+
+// documentPart renders one Anthropic document block as a Responses
+// input_file part, preserving base64 and URL sources.
+func documentPart(blk shared.ClaudeBlock) (map[string]any, bool) {
+	name := blk.Title
+	if name == "" {
+		name = "document"
+	}
+	if blk.SourceURL != "" {
+		return map[string]any{"type": "input_file", "filename": name, "file_url": blk.SourceURL}, true
+	}
+	if blk.Data != "" {
+		media := blk.MediaType
+		if media == "" {
+			media = "application/pdf"
+		}
+		return map[string]any{
+			"type": "input_file", "filename": name,
+			"file_data": "data:" + media + ";base64," + blk.Data,
+		}, true
+	}
+	return nil, false
+}
+
+// reasoningItem renders a Responses reasoning input item with only the
+// replayable fields: id, summary, and encrypted_content.
+func reasoningItem(item shared.RespItem) map[string]any {
+	out := map[string]any{"type": "reasoning"}
+	if item.ID != "" {
+		out["id"] = item.ID
+	}
+	if len(item.Summary) > 0 {
+		summary := make([]map[string]any, 0, len(item.Summary))
+		for _, part := range item.Summary {
+			summary = append(summary, map[string]any{"type": "summary_text", "text": part.Text})
+		}
+		out["summary"] = summary
+	}
+	if item.EncryptedContent != "" {
+		out["encrypted_content"] = item.EncryptedContent
+	}
+	return out
 }
 
 // reasoningShapeOf reports which wire shape an inbound reasoning item uses.

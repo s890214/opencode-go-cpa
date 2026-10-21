@@ -140,13 +140,80 @@ func DefaultArgs(args string) string {
 // without one.
 var emptyObjectSchema = json.RawMessage(`{"type":"object","properties":{}}`)
 
-// ObjectSchema normalizes an absent or null parameter schema to the empty
-// object schema; a present schema passes through untouched.
+// ResponsesMinOutputTokens is the smallest max_output_tokens the Responses
+// API accepts. Claude Desktop's availability probe sends max_tokens=1, so a
+// translated request must clamp it instead of failing the whole probe.
+const ResponsesMinOutputTokens = 16
+
+// ResponsesMaxOutputTokens clamps a positive token budget up to the Responses
+// floor. Zero/negative values keep their pass-through semantics.
+func ResponsesMaxOutputTokens(n int64) int64 {
+	if n > 0 && n < ResponsesMinOutputTokens {
+		return ResponsesMinOutputTokens
+	}
+	return n
+}
+
+// ObjectSchema normalizes a tool parameter schema: an absent/null schema
+// becomes the empty object schema; a present schema is cleaned for strict
+// OpenAI-compatible backends. Cleaning adds the root object type/properties
+// and removes "format": "uri" recursively, matching what CC Switch does for
+// the same upstream class.
 func ObjectSchema(raw json.RawMessage) json.RawMessage {
+	return CleanSchema(raw)
+}
+
+// CleanSchema returns a schema safe for strict Chat/Responses backends.
+func CleanSchema(raw json.RawMessage) json.RawMessage {
 	if !HasContent(raw) {
 		return emptyObjectSchema
 	}
-	return raw
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return raw
+	}
+	v = cleanSchemaValue(v, true)
+	b, err := json.Marshal(v)
+	if err != nil {
+		return raw
+	}
+	return b
+}
+
+func cleanSchemaValue(v any, root bool) any {
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return v
+	}
+	typ, hasType := obj["type"].(string)
+	if root && (!hasType || typ == "" || typ == "object") {
+		if !hasType || typ == "" {
+			obj["type"] = "object"
+		}
+		if _, hasProps := obj["properties"]; !hasProps {
+			obj["properties"] = map[string]any{}
+		}
+	}
+	if format, _ := obj["format"].(string); format == "uri" {
+		delete(obj, "format")
+	}
+	if props, ok := obj["properties"].(map[string]any); ok {
+		for k, child := range props {
+			props[k] = cleanSchemaValue(child, false)
+		}
+	}
+	if items, ok := obj["items"]; ok {
+		obj["items"] = cleanSchemaValue(items, false)
+	}
+	return obj
+}
+
+// WrapCustomToolInput wraps a freeform custom-tool input into the JSON object
+// Chat upstreams expect for function arguments. Passing the raw patch/code
+// text as "arguments" is invalid JSON and gets a 400 from strict backends.
+func WrapCustomToolInput(input string) string {
+	b, _ := json.Marshal(map[string]string{"input": input})
+	return string(b)
 }
 
 // ToolChoice kinds returned by DecodeToolChoice: "absent" (field missing
@@ -223,15 +290,14 @@ func DecodeToolChoice(raw json.RawMessage) (kind, name string, eErr *errclass.Er
 
 // DecodeArgs parses tool-call arguments JSON; empty arguments decode to an
 // empty object so every tool call carries valid input (FR-005/FR-006:
-// tool calls are never silently dropped).
-//
-// Accepted ceiling: cross-format legs round-trip args through float64;
-// integers > 2^53 lose precision — Responses passthrough preserves bytes.
-// Upgrade path: carry json.RawMessage end-to-end.
+// tool calls are never silently dropped). json.Number preserves integers
+// above 2^53, which a float64 round-trip would silently rounded.
 func DecodeArgs(args string) (any, *errclass.Error) {
 	args = DefaultArgs(args)
 	var v any
-	if err := json.Unmarshal([]byte(args), &v); err != nil {
+	dec := json.NewDecoder(strings.NewReader(args))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
 		return nil, errclass.Translation("malformed tool call arguments JSON: " + err.Error())
 	}
 	return v, nil
@@ -756,6 +822,22 @@ func (e ResponsesEventEmitter) TextDelta(itemID string, outputIndex int, delta s
 	})
 }
 
+// ReasoningPartAdded opens the summary part of an announced reasoning item.
+func (e ResponsesEventEmitter) ReasoningPartAdded(itemID string, outputIndex int) []byte {
+	return SSEEvent("response.reasoning_summary_part.added", map[string]any{
+		"type": "response.reasoning_summary_part.added", "item_id": itemID, "output_index": outputIndex,
+		"summary_index": 0, "part": map[string]any{"type": "summary_text", "text": ""},
+	})
+}
+
+// ReasoningDelta streams one partial reasoning summary delta.
+func (e ResponsesEventEmitter) ReasoningDelta(itemID string, outputIndex int, delta string) []byte {
+	return SSEEvent("response.reasoning_summary_text.delta", map[string]any{
+		"type": "response.reasoning_summary_text.delta", "item_id": itemID, "output_index": outputIndex,
+		"summary_index": 0, "delta": delta,
+	})
+}
+
 // ArgsDelta streams one partial function_call_arguments delta referencing
 // the announced function_call item by item_id and output_index.
 func (e ResponsesEventEmitter) ArgsDelta(itemID string, outputIndex int, delta string) []byte {
@@ -1082,11 +1164,15 @@ type ResponsesResult struct {
 
 // RespTool is one Responses function tool.
 type RespTool struct {
-	Type        string          `json:"type"` // "function" or "namespace"
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
-	Tools       []RespTool      `json:"tools,omitempty"`
+	Type         string          `json:"type"` // "function", "namespace", or a hosted tool
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	Parameters   json.RawMessage `json:"parameters,omitempty"`
+	Tools        []RespTool      `json:"tools,omitempty"`
+	Filters      json.RawMessage `json:"filters,omitempty"`
+	UserLocation json.RawMessage `json:"user_location,omitempty"`
+	Strict       *bool           `json:"strict,omitempty"`
+	MaxUses      int             `json:"-"`
 }
 
 // ResponsesRequest decodes an inbound OpenAI Responses request body
@@ -1151,11 +1237,11 @@ func (r *ResponsesRequest) DecodeInputItems() ([]RespItem, *errclass.Error) {
 }
 
 // RespItem is one Responses input/output item (message, function_call,
-// or function_call_output). ID carries the item identity of synthesized
-// terminal message items (FR-006 sibling parity: the Chat Completions
-// and Messages routes emit the same "id" the streaming
-// response.output_item.added announcement used); function_call items stay
-// call_id-only per the documented canonical shape.
+// function_call_output, reasoning, or a compaction marker). ID carries the
+// item identity of synthesized terminal message items (FR-006 sibling
+// parity: the Chat Completions and Messages routes emit the same "id" the
+// streaming response.output_item.added announcement used); function_call
+// items stay call_id-only per the documented canonical shape.
 type RespItem struct {
 	Type      string          `json:"type"`
 	ID        string          `json:"id,omitempty"`
@@ -1166,11 +1252,15 @@ type RespItem struct {
 	Namespace string          `json:"namespace,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
 	Input     string          `json:"input,omitempty"`
+	Text      string          `json:"text,omitempty"`
+	ImageURL  json.RawMessage `json:"image_url,omitempty"`
 	Output    json.RawMessage `json:"output,omitempty"`
 	Summary   []struct {
+		Type string `json:"type,omitempty"`
 		Text string `json:"text"`
 	} `json:"summary,omitempty"`
-	Tools []RespTool `json:"tools,omitempty"`
+	EncryptedContent string     `json:"encrypted_content,omitempty"`
+	Tools            []RespTool `json:"tools,omitempty"`
 }
 
 // CCFunction is one Chat Completions tool function definition (decode and
@@ -1197,6 +1287,10 @@ type CCMessage struct {
 	Content    json.RawMessage `json:"content"` // string or typed parts
 	ToolCalls  []CCToolCall    `json:"tool_calls"`
 	ToolCallID string          `json:"tool_call_id"`
+	// ReasoningContent carries DeepSeek/MiMo thinking on replay. It is
+	// non-standard for strict OpenAI backends, so request builders set it
+	// only when the target upstream is known to accept it.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // CCTool is one Chat Completions tool definition.
@@ -1325,10 +1419,17 @@ func ClaudeBlocksFromOpenAI(raw json.RawMessage, target string) ([]map[string]an
 const ToolResultErrorPrefix = "[error] "
 
 // ClaudeTool is one Anthropic Messages tool definition (decode-only).
+// Type is populated for server-side tools (web_search_20250305 etc.); those
+// must not be flattened into plain functions.
 type ClaudeTool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Type           string          `json:"type"`
+	Name           string          `json:"name"`
+	Description    string          `json:"description"`
+	InputSchema    json.RawMessage `json:"input_schema"`
+	MaxUses        int             `json:"max_uses,omitempty"`
+	AllowedDomains []string        `json:"allowed_domains,omitempty"`
+	BlockedDomains []string        `json:"blocked_domains,omitempty"`
+	UserLocation   json.RawMessage `json:"user_location,omitempty"`
 }
 
 // ClaudeThinking is the Anthropic extended-thinking request control
@@ -1351,14 +1452,24 @@ func ThinkingEnabled(t *ClaudeThinking) bool {
 // through ClaudeImageURL; tool_use Input and tool_result Result stay raw
 // so each target renderer applies its own vocabulary and policies.
 type ClaudeBlock struct {
-	Kind    string          // text, image, tool_use, tool_result, thinking, redacted_thinking, or an unknown wire type
+	Kind    string          // text, image, document, tool_use, tool_result, thinking, redacted_thinking, or an unknown wire type
 	Text    string          // text blocks
-	URL     string          // image blocks: resolved http(s)/data URL
+	URL     string          // image/document URL
 	CallID  string          // tool_use "id" / tool_result "tool_use_id"
 	Name    string          // tool_use name
 	Input   json.RawMessage // tool_use arguments (absent → nil)
 	Result  json.RawMessage // tool_result payload (string or block array)
 	IsError bool            // tool_result is_error flag
+	// Document fields (Anthropic document blocks → Responses input_file).
+	Title      string
+	Context    string
+	SourceType string
+	MediaType  string
+	Data       string
+	SourceURL  string
+	// Thinking block fields.
+	Thinking  string
+	Signature string
 }
 
 // ClaudeMessageRecord is one Anthropic Messages message turn: Content is
@@ -1403,8 +1514,10 @@ type claudeWireBlock struct {
 	// Thinking carries a thinking block's payload (Anthropic puts it in
 	// "thinking", not "text"); it is folded into ClaudeBlock.Text so
 	// adapters that must replay it do not need a second decoder.
-	Thinking string `json:"thinking"`
-	Source   *struct {
+	Thinking  string `json:"thinking"`
+	Signature string `json:"signature"`
+	Data      string `json:"data"` // redacted_thinking payload
+	Source    *struct {
 		Type      string `json:"type"` // base64 | url
 		MediaType string `json:"media_type"`
 		Data      string `json:"data"`
@@ -1416,6 +1529,9 @@ type claudeWireBlock struct {
 	ToolUseID string          `json:"tool_use_id"`
 	Content   json.RawMessage `json:"content"` // tool_result payload: string or blocks
 	IsError   bool            `json:"is_error"`
+	// Document blocks carry title/context beside source.
+	Title   string `json:"title"`
+	Context string `json:"context"`
 }
 
 // DecodeClaudeMessages decodes an inbound Anthropic Messages request body
@@ -1517,6 +1633,19 @@ func decodeClaudeBlocks(raw json.RawMessage) ([]ClaudeBlock, *errclass.Error) {
 			blk.CallID = wb.ToolUseID
 		case "thinking":
 			blk.Text = wb.Thinking
+			blk.Thinking = wb.Thinking
+			blk.Signature = wb.Signature
+		case "redacted_thinking":
+			blk.Data = wb.Data
+		case "document":
+			blk.Title = wb.Title
+			blk.Context = wb.Context
+			if wb.Source != nil {
+				blk.SourceType = wb.Source.Type
+				blk.MediaType = wb.Source.MediaType
+				blk.Data = wb.Source.Data
+				blk.SourceURL = wb.Source.URL
+			}
 		}
 		blocks = append(blocks, blk)
 	}
@@ -1660,6 +1789,13 @@ func (a *OutputAssembler) ReserveTextSlot() {
 // AddText appends one text fragment to the aggregated message.
 func (a *OutputAssembler) AddText(fragment string) {
 	a.text.WriteString(fragment)
+}
+
+// AppendReasoning adds a reasoning item at the current position. It is used
+// by the Messages route to carry bridge-owned signed thinking through a
+// Responses client without reordering text/tool items.
+func (a *OutputAssembler) AppendReasoning(item RespItem) {
+	a.items = append(a.items, item)
 }
 
 // AppendFunctionCall adds one function_call item in arrival order;

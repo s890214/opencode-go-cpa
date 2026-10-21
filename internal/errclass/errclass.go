@@ -164,10 +164,18 @@ func redactAPIKey(match string) string {
 // yields the same text.
 var queryKeyRe = regexp.MustCompile(`(?i)([?&](?:api[_-]?key|key|access[_-]?token|token)=)[^\s&"']+`)
 
-// Redact strips bearer tokens, x-api-key echoes, and query-string key
-// parameters from a message so keys never reach logs or clients.
+// bareKeyRe catches provider keys echoed without a bearer/x-api-key prefix,
+// which is how OpenAI-compatible upstreams usually phrase 401 bodies
+// ("Incorrect API key provided: sk-..."). The alphabet covers common key
+// shapes; the 8-char floor avoids matching prose like "sk-".
+var bareKeyRe = regexp.MustCompile(`(?i)\bsk-[A-Za-z0-9_-]{8,}\b`)
+
+// Redact strips bearer tokens, x-api-key echoes, bare sk- keys, and
+// query-string key parameters from a message so keys never reach logs or
+// clients.
 func Redact(msg string) string {
 	msg = bearerRe.ReplaceAllString(msg, "Bearer [redacted]")
 	msg = apiKeyRe.ReplaceAllStringFunc(msg, redactAPIKey)
-	return queryKeyRe.ReplaceAllString(msg, "${1}[redacted]")
+	msg = queryKeyRe.ReplaceAllString(msg, "${1}[redacted]")
+	return bareKeyRe.ReplaceAllString(msg, "[redacted]")
 }

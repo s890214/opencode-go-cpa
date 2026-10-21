@@ -46,8 +46,10 @@ type blockState struct {
 	ordinal       int             // compact tool_calls index for openai chunks
 	outIdx        int             // responses: compacted output_index assigned at block start
 	emitted       bool            // openai: id/name attached to the first arguments fragment
-	text          strings.Builder // accumulated text_delta content (responses target)
+	text          strings.Builder // accumulated text/thinking_delta content
 	args          strings.Builder // accumulated input_json_delta content (responses target)
+	signature     string          // Anthropic thinking signature (signature_delta)
+	data          string          // redacted_thinking payload
 	customEmitted int             // custom_tool_call_input bytes already emitted as deltas
 }
 
@@ -145,13 +147,16 @@ type contentBlock struct {
 	Type string `json:"type"`
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	Data string `json:"data"`
 }
 
 type deltaBody struct {
 	Type        string `json:"type"`
 	Text        string `json:"text"`
+	Thinking    string `json:"thinking"`
 	PartialJSON string `json:"partial_json"`
 	StopReason  string `json:"stop_reason"`
+	Signature   string `json:"signature"`
 }
 
 type usageCounts struct {
@@ -194,12 +199,23 @@ func (sc *StreamConverter) dispatchOpenAI(etype string, ev *sseEvent, events *[]
 		sc.emitRole(events)
 	case "content_block_start":
 		bs := &blockState{kind: ev.ContentBlock.Type, id: ev.ContentBlock.ID, name: ev.ContentBlock.Name}
+		bs.data = ev.ContentBlock.Data
 		if bs.kind == "tool_use" {
 			bs.ordinal = sc.toolOrdinal
 			sc.toolOrdinal++
 			sc.toolsSeen = true
 		}
 		sc.blocks[int(ev.Index)] = bs
+	case "content_block_stop":
+		bs := sc.blocks[int(ev.Index)]
+		if bs != nil && bs.kind == "tool_use" && !bs.emitted {
+			// A zero-argument tool has no input_json_delta. Emit the call
+			// now so a terminal tool_calls finish_reason is not a lie.
+			bs.emitted = true
+			sc.emitRole(events)
+			tc := shared.CCToolCallOpeningEntry(bs.ordinal, bs.id, bs.name, "{}")
+			sc.emitChunk(events, map[string]any{"tool_calls": []any{tc}}, "", false)
+		}
 	case "content_block_delta":
 		bs := sc.blocks[int(ev.Index)]
 		switch ev.Delta.Type {
@@ -223,10 +239,21 @@ func (sc *StreamConverter) dispatchOpenAI(etype string, ev *sseEvent, events *[]
 			sc.emitRole(events)
 			sc.emitChunk(events, map[string]any{"tool_calls": []any{tc}}, "", false)
 		case "thinking_delta":
-			// FR-005 explicit omission policy: chat.completion.chunk has no
-			// standard reasoning-delta field, so thinking text is dropped
-			// rather than put in a non-standard field. Signatures have no
-			// destination either.
+			// Chat Completions has no standard reasoning delta, but
+			// DeepSeek/MiMo clients consume reasoning_content; emit it
+			// instead of dropping the model's thinking.
+			if bs == nil || (bs.kind != "thinking" && bs.kind != "redacted_thinking") {
+				break
+			}
+			text := ev.Delta.Thinking
+			if text == "" {
+				text = ev.Delta.Text
+			}
+			if text == "" {
+				break
+			}
+			sc.emitRole(events)
+			sc.emitChunk(events, map[string]any{"reasoning_content": text}, "", false)
 		}
 	case "message_delta":
 		if ev.Usage.InputTokens != 0 {
@@ -261,6 +288,7 @@ func (sc *StreamConverter) dispatchResponses(etype string, ev *sseEvent, events 
 		*events = append(*events, sc.responsesEm().Created())
 	case "content_block_start":
 		bs := &blockState{kind: ev.ContentBlock.Type, id: ev.ContentBlock.ID, name: ev.ContentBlock.Name}
+		bs.data = ev.ContentBlock.Data
 		sc.blocks[int(ev.Index)] = bs
 		// Announce each translatable item before its first delta (F18
 		// lifecycle parity); thinking blocks produce no deltas and are
@@ -286,6 +314,15 @@ func (sc *StreamConverter) dispatchResponses(etype string, ev *sseEvent, events 
 			*events = append(*events, sc.responsesEm().ItemAdded(bs.outIdx, map[string]any{
 				"type": "function_call", "call_id": bs.id, "name": bs.name, "arguments": "",
 			}))
+		case "thinking", "redacted_thinking":
+			bs.outIdx = sc.outCount
+			sc.outCount++
+			itemID := sc.msgID + "-rs-" + fmt.Sprint(bs.outIdx)
+			bs.ordinal = bs.outIdx // reuse for the reasoning item id index
+			*events = append(*events, sc.responsesEm().ItemAdded(bs.outIdx, map[string]any{
+				"type": "reasoning", "id": itemID, "summary": []any{},
+			}))
+			*events = append(*events, sc.responsesEm().ReasoningPartAdded(itemID, bs.outIdx))
 		}
 	case "content_block_delta":
 		idx := int(ev.Index)
@@ -318,8 +355,26 @@ func (sc *StreamConverter) dispatchResponses(etype string, ev *sseEvent, events 
 				*events = append(*events, sc.responsesEm().ArgsDelta(bs.id, bs.outIdx, ev.Delta.PartialJSON))
 			}
 		case "thinking_delta":
-			// FR-005 explicit omission policy: no standard Responses
-			// reasoning-delta event; dropped.
+			if bs != nil && (bs.kind == "thinking" || bs.kind == "redacted_thinking") {
+				text := ev.Delta.Thinking
+				if text == "" {
+					text = ev.Delta.Text
+				}
+				bs.text.WriteString(text)
+				itemID := sc.msgID + "-rs-" + fmt.Sprint(bs.outIdx)
+				*events = append(*events, sc.responsesEm().ReasoningDelta(itemID, bs.outIdx, text))
+			}
+		case "signature_delta":
+			if bs != nil {
+				bs.signature = ev.Delta.Signature
+			}
+		}
+	case "content_block_stop":
+		bs := sc.blocks[int(ev.Index)]
+		if bs != nil && (bs.kind == "thinking" || bs.kind == "redacted_thinking") {
+			if item, ok := reasoningItemForBlock(sc.msgID+"-rs-"+fmt.Sprint(bs.outIdx), bs.kind, bs.text.String(), bs.signature, bs.data); ok {
+				*events = append(*events, sc.responsesEm().ItemDone(bs.outIdx, item))
+			}
 		}
 	case "message_delta":
 		if ev.Usage.InputTokens != 0 {
@@ -367,6 +422,8 @@ func (sc *StreamConverter) responsesCompleted() [][]byte {
 			out = append(out, em.ArgsDone(v.CallID, idx, v.Name, v.Arguments), em.ItemDone(idx, v))
 		case "custom_tool_call":
 			out = append(out, em.InputDone(v.CallID, idx, v.Input), em.ItemDone(idx, v))
+		case "reasoning":
+			out = append(out, em.ItemDone(idx, v))
 		}
 	}
 	return append(out, em.Completed(status, usage, items))
@@ -441,9 +498,36 @@ func (sc *StreamConverter) outputItems() []any {
 			oa.AddText(bs.text.String())
 		case "tool_use":
 			oa.AppendFunctionCall(bs.id, bs.name, shared.DefaultArgs(bs.args.String()))
+		case "thinking":
+			if item, ok := reasoningItemForBlock(sc.msgID+"-rs-"+fmt.Sprint(i), bs.kind, bs.text.String(), bs.signature, bs.data); ok {
+				oa.AppendReasoning(item)
+			}
+		case "redacted_thinking":
+			if item, ok := reasoningItemForBlock(sc.msgID+"-rs-"+fmt.Sprint(i), bs.kind, bs.text.String(), bs.signature, bs.data); ok {
+				oa.AppendReasoning(item)
+			}
 		}
 	}
 	return oa.Render()
+}
+
+// reasoningItemForBlock renders the Responses reasoning item for one
+// Anthropic thinking block. A bridge-owned signature restores the original
+// item; an unsigned thinking block still keeps its visible summary.
+func reasoningItemForBlock(id, kind, text, signature, data string) (shared.RespItem, bool) {
+	block := map[string]any{"type": kind, "thinking": text, "signature": signature, "data": data}
+	if item, ok := shared.ReasoningItemFromThinkingBlock(id, block); ok {
+		return item, true
+	}
+	if kind == "thinking" && text != "" {
+		item := shared.RespItem{Type: "reasoning", ID: id}
+		item.Summary = append(item.Summary, struct {
+			Type string `json:"type,omitempty"`
+			Text string `json:"text"`
+		}{Type: "summary_text", Text: text})
+		return item, true
+	}
+	return shared.RespItem{}, false
 }
 
 // chatChunks binds the shared chunk kernel to the captured upstream

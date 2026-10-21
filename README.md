@@ -75,6 +75,11 @@ Place the compiled binary into your CLIProxyAPI plugin directory (e.g. `<cliprox
 
 Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.opencode-go-cpa`:
 
+> Upgrading from 0.5: `base-url` is now the service root, not the versioned
+> root. If your config has `base-url: .../v1`, drop the trailing `/v1` and
+> spell the full protocol paths in `protocol-endpoints`; the join is verbatim,
+> so leaving both produces `/v1/v1/...`.
+
 ```yaml
 plugins:
   configs:
@@ -139,7 +144,14 @@ plugins:
         "custom-proxy-model":
           protocols: ["chat-completions", "responses"]
           endpoints:
-            responses: "/v1/responses"     # must start with /
+            responses: "/openai/v1/responses"   # must start with /
+
+      # Optional family fallback for models not listed above. Omit this key to
+      # use the built-in family table; set `fallback-routes: []` to disable
+      # guessing entirely.
+      fallback-routes:
+        - { prefix: "gpt", protocol: "responses" }
+        - { prefix: "glm", protocol: "chat-completions" }
 
       # Legacy shortcut: a single-protocol model can be written as
       #   some-model: { protocols: [messages], endpoint: "/v1/messages" }
@@ -175,6 +187,7 @@ plugins:
 | `protocols.messages` | `bool` | `true` | Protocol switch for Messages endpoints. |
 | `protocols.responses` | `bool` | `true` | Protocol switch for Responses endpoints. |
 | `models` | `map` | `{}` | Per-model policy: `protocols` (ordered, first = default route), `reasoning-shape` (`summary` \| `content`), `endpoints` (per-protocol path override). A model listed here owns its route outright. |
+| `fallback-routes` | `[]object` | *(built-in table)* | Family prefixes for models `models` does not list (`{prefix, protocol}`, first match wins). Omit the key to use the built-in table; `[]` disables guessing. |
 | `models.<id>.reasoning-shape` | `string` | `summary` | Wire form of the reasoning item on the Responses route. `deepseek-v4-pro` needs `content`; every other measured model needs `summary` (or answers 503 for `content`). |
 | `models.<id>.endpoints` | `map` | `{}` | Optional path override per protocol; only needed when a protocol is not served at its default path. |
 | `protocol-preference` | `map` | `{}` | Legacy: protocols a model speaks natively. Merged into `models`. |

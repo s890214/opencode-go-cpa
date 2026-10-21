@@ -328,7 +328,7 @@ func TestBuildRequestClaude(t *testing.T) {
 	}
 	tlf := tl["function"].(map[string]any)
 	if tlf["name"] != "f" || tlf["description"] != "d" ||
-		fmt.Sprint(tlf["parameters"]) != "map[type:object]" {
+		fmt.Sprint(tlf["parameters"]) != "map[properties:map[] type:object]" {
 		t.Fatalf("tool function wrong: %v", tlf)
 	}
 }
@@ -536,23 +536,20 @@ func TestBuildRequestResponses(t *testing.T) {
 		t.Fatalf("envelope fields wrong: %v", m)
 	}
 	msgs := m["messages"].([]any)
-	if len(msgs) != 6 {
-		t.Fatalf("want 6 messages, got %d: %v", len(msgs), msgs)
+	if len(msgs) != 5 {
+		t.Fatalf("want 5 messages, got %d: %v", len(msgs), msgs)
 	}
-	if m0 := msgs[0].(map[string]any); m0["role"] != "system" || m0["content"] != "be nice" {
-		t.Fatalf("instructions message wrong: %v", m0)
+	if m0 := msgs[0].(map[string]any); m0["role"] != "system" || m0["content"] != "be nice\n\ndev" {
+		t.Fatalf("collapsed system message wrong: %v", m0)
 	}
-	if m1 := msgs[1].(map[string]any); m1["role"] != "system" || m1["content"] != "dev" {
-		t.Fatalf("developer item wrong: %v", m1)
-	}
-	user := msgs[2].(map[string]any)["content"].([]any)
+	user := msgs[1].(map[string]any)["content"].([]any)
 	if len(user) != 2 || user[1].(map[string]any)["type"] != "image_url" {
 		t.Fatalf("user parts wrong: %v", user)
 	}
-	if msgs[3].(map[string]any)["content"] != "a" {
-		t.Fatalf("assistant item wrong: %v", msgs[3])
+	if msgs[2].(map[string]any)["content"] != "a" {
+		t.Fatalf("assistant item wrong: %v", msgs[2])
 	}
-	merged := msgs[4].(map[string]any)
+	merged := msgs[3].(map[string]any)
 	calls := merged["tool_calls"].([]any)
 	if merged["role"] != "assistant" || len(calls) != 2 {
 		t.Fatalf("consecutive function_calls not merged: %v", merged)
@@ -564,7 +561,7 @@ func TestBuildRequestResponses(t *testing.T) {
 	if calls[1].(map[string]any)["function"].(map[string]any)["arguments"] != "{}" {
 		t.Fatalf("empty arguments not defaulted: %v", calls[1])
 	}
-	outMsg := msgs[5].(map[string]any)
+	outMsg := msgs[4].(map[string]any)
 	if outMsg["role"] != "tool" || outMsg["tool_call_id"] != "c1" || outMsg["content"] != "ok" {
 		t.Fatalf("function_call_output wrong: %v", outMsg)
 	}
@@ -809,33 +806,35 @@ func TestResponsesReasoningEffortValidated(t *testing.T) {
 
 // F-drift pins: tool_choice preserved on both CC-target cross-format legs.
 func TestClaudeSourceToolChoicePreserved(t *testing.T) {
+	tools := `"tools":[{"name":"lookup","input_schema":{"type":"object"}}],`
 	m := mustBuild(t, "claude",
-		`{"tool_choice":{"type":"auto","name":""},"messages":[{"role":"user","content":"hi"}]}`, nil)
+		`{`+tools+`"tool_choice":{"type":"auto","name":""},"messages":[{"role":"user","content":"hi"}]}`, nil)
 	if m["tool_choice"] != "auto" {
 		t.Fatalf("auto tool_choice = %v", m["tool_choice"])
 	}
 	m = mustBuild(t, "claude",
-		`{"tool_choice":{"type":"tool","name":"lookup"},"messages":[{"role":"user","content":"hi"}]}`, nil)
+		`{`+tools+`"tool_choice":{"type":"tool","name":"lookup"},"messages":[{"role":"user","content":"hi"}]}`, nil)
 	tc, ok := m["tool_choice"].(map[string]any)
 	if !ok || tc["type"] != "function" ||
 		tc["function"].(map[string]any)["name"] != "lookup" {
 		t.Fatalf("named tool_choice = %v", m["tool_choice"])
 	}
 	m = mustBuild(t, "claude",
-		`{"tool_choice":{"type":"any"},"messages":[]}`, nil)
+		`{`+tools+`"tool_choice":{"type":"any"},"messages":[]}`, nil)
 	if m["tool_choice"] != "required" {
 		t.Fatalf("any tool_choice = %v", m["tool_choice"])
 	}
 }
 
 func TestResponsesSourceToolChoicePreserved(t *testing.T) {
+	tools := `"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],`
 	m := mustBuild(t, "openai-response",
-		`{"tool_choice":"auto","input":"hi"}`, nil)
+		`{`+tools+`"tool_choice":"auto","input":"hi"}`, nil)
 	if m["tool_choice"] != "auto" {
 		t.Fatalf("auto tool_choice = %v", m["tool_choice"])
 	}
 	m = mustBuild(t, "openai-response",
-		`{"tool_choice":{"type":"function","name":"lookup"},"input":"hi"}`, nil)
+		`{`+tools+`"tool_choice":{"type":"function","name":"lookup"},"input":"hi"}`, nil)
 	tc, ok := m["tool_choice"].(map[string]any)
 	if !ok || tc["type"] != "function" ||
 		tc["function"].(map[string]any)["name"] != "lookup" {
@@ -848,7 +847,7 @@ func TestResponsesSourceToolChoicePreserved(t *testing.T) {
 
 func TestClaudeSourceNoneToolChoicePreserved(t *testing.T) {
 	m := mustBuild(t, "claude",
-		`{"tool_choice":{"type":"none","name":""},"messages":[]}`, nil)
+		`{"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"tool_choice":{"type":"none","name":""},"messages":[]}`, nil)
 	if m["tool_choice"] != "none" {
 		t.Fatalf("none tool_choice = %v", m["tool_choice"])
 	}
@@ -856,7 +855,7 @@ func TestClaudeSourceNoneToolChoicePreserved(t *testing.T) {
 
 func TestResponsesSourceNoneToolChoicePreserved(t *testing.T) {
 	m := mustBuild(t, "openai-response",
-		`{"tool_choice":"none","input":"hi"}`, nil)
+		`{"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":"none","input":"hi"}`, nil)
 	if m["tool_choice"] != "none" {
 		t.Fatalf("none tool_choice = %v", m["tool_choice"])
 	}
@@ -875,7 +874,7 @@ func TestApplyToolChoiceCC(t *testing.T) {
 		{shared.ToolChoiceNone, "", "none"},
 	}
 	for _, tc := range cases {
-		req := &ccRequest{}
+		req := &ccRequest{Tools: []shared.CCTool{{Type: "function"}}}
 		applyToolChoiceCC(req, tc.kind, tc.name)
 		b, _ := json.Marshal(req)
 		var m map[string]any
@@ -888,7 +887,7 @@ func TestApplyToolChoiceCC(t *testing.T) {
 		}
 	}
 
-	req := &ccRequest{}
+	req := &ccRequest{Tools: []shared.CCTool{{Type: "function"}}}
 	applyToolChoiceCC(req, shared.ToolChoiceNamed, "lookup")
 	var named struct {
 		Type     string `json:"type"`
@@ -909,7 +908,7 @@ func TestApplyToolChoiceCC(t *testing.T) {
 // nothing and fails here.
 func TestApplyToolChoiceCCKindsExhaustive(t *testing.T) {
 	for _, kind := range shared.AllToolChoiceKinds {
-		req := &ccRequest{}
+		req := &ccRequest{Tools: []shared.CCTool{{Type: "function"}}}
 		applyToolChoiceCC(req, kind, "probe")
 		if kind == shared.ToolChoiceAbsent {
 			if req.ToolChoice != nil {
@@ -997,7 +996,7 @@ func TestFromResponses_CustomToolCallAndOutput(t *testing.T) {
 		t.Fatalf("tool call id = %v, want call_c1", c0["id"])
 	}
 	fn := c0["function"].(map[string]any)
-	if fn["name"] != "exec" || fn["arguments"] != "text('ok');" {
+	if fn["name"] != "exec" || fn["arguments"] != `{"input":"text('ok');"}` {
 		t.Fatalf("tool call function wrong: %v", fn)
 	}
 	tool := msgs[2].(map[string]any)

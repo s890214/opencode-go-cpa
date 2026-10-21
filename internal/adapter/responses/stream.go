@@ -3,6 +3,7 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"opencode-go-cpa/internal/adapter/shared"
 	"opencode-go-cpa/internal/errclass"
@@ -41,6 +42,14 @@ type StreamConverter struct {
 	nextIndex  int
 	openBlocks []int
 
+	// Reasoning bridge state for the Claude target: a Responses reasoning
+	// summary becomes one thinking block whose signature carries the item.
+	reasoningIndex     int
+	reasoningOpen      bool
+	reasoningText      strings.Builder
+	reasoningEncrypted string
+	reasoningID        string
+
 	// Shared function_call announce-or-replay decision table for both
 	// conversion targets; an instance converts to exactly one target,
 	// so nextIndex doubles as the tool block index allocator.
@@ -57,12 +66,13 @@ func NewStreamConverter(sourceFormat string, tools ...*shared.ResponseTools) *St
 		// embed raw newlines from legally multi-data-line frames and
 		// corrupt native framing. Conversion targets parse the joined
 		// payload and never read raw.
-		framer:      shared.NewSSEFramer(sourceFormat == "openai-response"),
-		source:      sourceFormat,
-		id:          "opencode-go",
-		textIndex:   -1,
-		respTools:   shared.ResponseToolContext(tools),
-		customItems: map[string]struct{}{},
+		framer:         shared.NewSSEFramer(sourceFormat == "openai-response"),
+		source:         sourceFormat,
+		id:             "opencode-go",
+		textIndex:      -1,
+		reasoningIndex: -1,
+		respTools:      shared.ResponseToolContext(tools),
+		customItems:    map[string]struct{}{},
 	}
 	sc.tracker = newToolCallTracker(sc.allocIndex)
 	return sc
@@ -185,11 +195,13 @@ type responseMeta struct {
 }
 
 type functionCallItem struct {
-	Type      string `json:"type"`
-	CallID    string `json:"call_id"`
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+	Type             string         `json:"type"`
+	CallID           string         `json:"call_id"`
+	ID               string         `json:"id"`
+	Name             string         `json:"name"`
+	Arguments        string         `json:"arguments"`
+	Summary          []respTextPart `json:"summary"`
+	EncryptedContent string         `json:"encrypted_content"`
 }
 
 type createdEvent struct {
@@ -312,7 +324,16 @@ func (sc *StreamConverter) convertEvent(eventType, payload string) ([][]byte, bo
 		if eErr := sc.checkTarget(); eErr != nil {
 			return nil, false, eErr
 		}
-		return sc.outputItem(&ev.Item)
+		return sc.outputItem(&ev.Item, eventType == "response.output_item.done")
+	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		var ev textDeltaEvent
+		if eErr := decodeEvent(eventType, payload, &ev); eErr != nil {
+			return nil, false, eErr
+		}
+		if eErr := sc.checkTarget(); eErr != nil {
+			return nil, false, eErr
+		}
+		return sc.reasoningDelta(ev.Delta)
 	case "response.function_call_arguments.delta":
 		var ev argsDeltaEvent
 		if eErr := decodeEvent(eventType, payload, &ev); eErr != nil {
@@ -502,10 +523,113 @@ func (sc *StreamConverter) textDelta(delta string) ([][]byte, bool, *errclass.Er
 	return out, false, nil
 }
 
+// reasoningDelta streams one reasoning summary delta: Chat clients get
+// reasoning_content; Messages clients get a thinking block that opens on the
+// first delta.
+func (sc *StreamConverter) reasoningDelta(delta string) ([][]byte, bool, *errclass.Error) {
+	if delta == "" {
+		return nil, false, nil
+	}
+	if sc.source == "openai" {
+		return [][]byte{sc.chatChunks().Delta(map[string]any{"reasoning_content": delta})}, false, nil
+	}
+	var out [][]byte
+	if !sc.reasoningOpen {
+		out = append(out, sc.closeOpenBlocks()...)
+		sc.reasoningIndex = sc.allocIndex()
+		sc.reasoningOpen = true
+		sc.openBlocks = append(sc.openBlocks, sc.reasoningIndex)
+		out = append(out, sc.claudeChunks().ContentBlockStart(sc.reasoningIndex, "thinking",
+			map[string]any{"thinking": ""}))
+	}
+	sc.reasoningText.WriteString(delta)
+	out = append(out, sc.claudeChunks().ContentBlockDelta(sc.reasoningIndex,
+		map[string]any{"type": "thinking_delta", "thinking": delta}))
+	return out, false, nil
+}
+
+// outputReasoning handles a reasoning output item. Deltas normally carry the
+// text; an item that arrives complete at .done is replayed once. Closing on
+// .done attaches the bridge signature so the Claude client can replay it.
+func (sc *StreamConverter) outputReasoning(item *functionCallItem, done bool) ([][]byte, bool, *errclass.Error) {
+	if item.EncryptedContent != "" {
+		sc.reasoningEncrypted = item.EncryptedContent
+	}
+	if item.ID != "" {
+		sc.reasoningID = item.ID
+	}
+	text := ""
+	parts := make([]string, 0, len(item.Summary))
+	for _, part := range item.Summary {
+		if part.Text != "" {
+			parts = append(parts, part.Text)
+		}
+	}
+	text = strings.Join(parts, "\n")
+	var out [][]byte
+	if text != "" && sc.reasoningText.Len() == 0 {
+		events, _, eErr := sc.reasoningDelta(text)
+		if eErr != nil {
+			return nil, false, eErr
+		}
+		out = append(out, events...)
+	}
+	if done && sc.source != "openai" {
+		out = append(out, sc.reasoningClose()...)
+	}
+	return out, false, nil
+}
+
+// reasoningClose emits the signature delta and block stop for the open
+// thinking block. The signature is a bridge envelope when the upstream
+// supplied encrypted_content, otherwise a synthetic marker that the same
+// route decodes back to reasoning_content.
+func (sc *StreamConverter) reasoningClose() [][]byte {
+	if !sc.reasoningOpen {
+		return nil
+	}
+	em := sc.claudeChunks()
+	text := sc.reasoningText.String()
+	signature := ""
+	if sc.reasoningEncrypted != "" {
+		item := shared.RespItem{Type: "reasoning", ID: sc.reasoningID, EncryptedContent: sc.reasoningEncrypted}
+		if text != "" {
+			item.Summary = append(item.Summary, struct {
+				Type string `json:"type,omitempty"`
+				Text string `json:"text"`
+			}{Type: "summary_text", Text: text})
+		}
+		signature, _ = shared.EncodeOpenAIReasoningItem(item)
+	} else {
+		signature = shared.SyntheticThinkingSignature(text)
+	}
+	var out [][]byte
+	if signature != "" {
+		out = append(out, em.ContentBlockDelta(sc.reasoningIndex,
+			map[string]any{"type": "signature_delta", "signature": signature}))
+	}
+	out = append(out, em.ContentBlockStop(sc.reasoningIndex))
+	for i, idx := range sc.openBlocks {
+		if idx == sc.reasoningIndex {
+			sc.openBlocks = append(sc.openBlocks[:i], sc.openBlocks[i+1:]...)
+			break
+		}
+	}
+	sc.reasoningOpen = false
+	sc.reasoningIndex = -1
+	sc.reasoningText.Reset()
+	sc.reasoningEncrypted = ""
+	sc.reasoningID = ""
+	return out
+}
+
 // outputItem handles output_item.added/.done through the shared tracker:
 // Chat Completions announces/replays tool_calls entries, Messages opens
 // tool_use blocks with mandated pairing; non-function items are ignored.
-func (sc *StreamConverter) outputItem(item *functionCallItem) ([][]byte, bool, *errclass.Error) {
+func (sc *StreamConverter) outputItem(item *functionCallItem, done bool) ([][]byte, bool, *errclass.Error) {
+	if item.Type == "reasoning" {
+		return sc.outputReasoning(item, done)
+	}
 	if item.Type != "function_call" {
 		return nil, false, nil
 	}
@@ -606,11 +730,7 @@ func (sc *StreamConverter) terminal(incomplete bool, in, out int, details shared
 	stop := shared.TerminalReason(sc.toolCallsSeen, "tool_use", statusStop)
 	cacheRead, cacheWrite := details.CachedTokens, details.CacheWriteTokens
 	em := sc.claudeChunks()
-	var events [][]byte
-	for _, idx := range sc.openBlocks {
-		events = append(events, em.ContentBlockStop(idx))
-	}
-	sc.openBlocks = nil
+	events := sc.closeOpenBlocks()
 	events = append(events,
 		em.MessageDelta(&stop, shared.ClaudeUsage(shared.ClampSubtract(int64(in), cacheRead, cacheWrite), int64(out), cacheRead, cacheWrite)),
 		em.MessageStop(),
@@ -639,11 +759,14 @@ func (sc *StreamConverter) claudeChunks() shared.ClaudeEventEmitter {
 // the text block is marked closed so a later text delta reopens a fresh
 // block (stop/reopen parity with the Chat Completions route).
 func (sc *StreamConverter) closeOpenBlocks() [][]byte {
+	var out [][]byte
+	if sc.reasoningOpen {
+		out = append(out, sc.reasoningClose()...)
+	}
 	if len(sc.openBlocks) == 0 {
-		return nil
+		return out
 	}
 	em := sc.claudeChunks()
-	var out [][]byte
 	for _, idx := range sc.openBlocks {
 		out = append(out, em.ContentBlockStop(idx))
 	}

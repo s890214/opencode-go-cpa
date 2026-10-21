@@ -307,13 +307,16 @@ func (b *msgBuilder) flush() {
 // finalize assembles the shared envelope fields, resolves the client
 // reasoning effort to a thinking budget via the model's declared
 // capability (FR-005: unsupported levels are rejected explicitly, never
-// dropped), and encodes the request.
-func finalize(req *messagesRequest, system []string, effort string, ts *pluginapi.ThinkingSupport) ([]byte, *errclass.Error) {
+// dropped), and encodes the request. thinkingEligible is false when the
+// replayed history cannot legally continue a thinking turn (tool results
+// without a signed thinking block); thinking is then disabled instead of
+// sending a request Anthropic answers with 400.
+func finalize(req *messagesRequest, system []string, effort string, ts *pluginapi.ThinkingSupport, thinkingEligible bool) ([]byte, *errclass.Error) {
 	req.System = systemField(system)
 	if req.Messages == nil {
 		req.Messages = []anthropicMessage{}
 	}
-	if effort != "" {
+	if effort != "" && thinkingEligible {
 		budget, _ := thinking.BudgetFromEffort(effort, ts)
 		applyThinking(req, budget)
 	}
@@ -329,15 +332,22 @@ func finalize(req *messagesRequest, system []string, effort string, ts *pluginap
 // today — so it is omitted rather than fabricated (FR-005 explicit
 // omission policy). budget > 0 enables thinking and drops sampling
 // controls, which Anthropic rejects alongside thinking.
+//
+// The budget is raised above max_tokens when needed so the visible answer
+// still has room; Anthropic requires budget_tokens < max_tokens. A budget
+// below Anthropic's 1024 floor is dropped.
 func applyThinking(req *messagesRequest, budget int64) {
 	if budget <= 0 {
 		return
 	}
+	if budget < 1024 {
+		return
+	}
+	if req.MaxTokens > 0 && req.MaxTokens <= budget {
+		req.MaxTokens = budget + 1024
+	}
 	req.Thinking = &shared.ClaudeThinking{Type: "enabled", BudgetTokens: budget}
 	req.Temperature, req.TopP = nil, nil
-	if req.MaxTokens <= budget {
-		req.MaxTokens = budget + 1024 // budget_tokens must be < max_tokens
-	}
 }
 
 // fromChatCompletions translates a Chat Completions request into a
@@ -378,6 +388,7 @@ func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.Thinki
 	req.StopSequences = stop
 
 	var system []string
+	hasToolHistory := false
 	var b msgBuilder
 	for i := range src.Messages {
 		m := &src.Messages[i]
@@ -403,15 +414,19 @@ func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.Thinki
 				b.add("assistant", "assistant", textBlock(text))
 			}
 			for _, tc := range m.ToolCalls {
+				hasToolHistory = true
 				input, eErr := shared.DecodeArgs(tc.Function.Arguments)
 				if eErr != nil {
-					return nil, eErr
+					// A malformed historical call must not fail the whole
+					// turn; the tool result still carries the real payload.
+					input = map[string]any{}
 				}
 				b.add("assistant", "assistant", anthropicBlock{
 					"type": "tool_use", "id": tc.ID, "name": tc.Function.Name, "input": input,
 				})
 			}
 		case "tool":
+			hasToolHistory = true
 			blocks, eErr := contentParts(m.Content)
 			if eErr != nil {
 				return nil, eErr
@@ -457,14 +472,15 @@ func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.Thinki
 	if eErr := applyToolChoiceMessages(req, kind, tcName, src.ParallelToolCalls); eErr != nil {
 		return nil, eErr
 	}
-	return finalize(req, system, src.ReasoningEffort, ts)
+	return finalize(req, system, src.ReasoningEffort, ts, !hasToolHistory)
 }
 
 // fromResponses translates an OpenAI Responses request into a Messages
 // request (FR-005): instructions become the system field, message items
 // map like Chat Completions messages, function_call/function_call_output
-// items map to tool_use/tool_result blocks, reasoning summaries are kept
-// as best-effort thinking blocks (signatures unavailable upstream).
+// items map to tool_use/tool_result blocks, and bridge-owned reasoning
+// items restore their signed thinking block. Foreign reasoning summaries
+// are not replayed: an unsigned thinking block is rejected by Anthropic.
 func fromResponses(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport, tools *shared.ResponseTools) ([]byte, *errclass.Error) {
 	var src shared.ResponsesRequest
 	if err := json.Unmarshal(body, &src); err != nil {
@@ -497,6 +513,8 @@ func fromResponses(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupp
 	if eErr != nil {
 		return nil, eErr
 	}
+	hasToolHistory := false
+	hasSignedThinking := false
 	for _, item := range items {
 		switch item.Type {
 		case "message":
@@ -524,15 +542,22 @@ func fromResponses(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupp
 			default:
 				return nil, shared.ValidateRole(item.Role, EndpointPath)
 			}
-		case "function_call":
+		case "function_call", "tool_search_call":
+			hasToolHistory = true
 			input, eErr := shared.DecodeArgs(item.Arguments)
 			if eErr != nil {
-				return nil, eErr
+				// Historical malformed arguments must not fail the turn.
+				input = map[string]any{}
+			}
+			name := item.Name
+			if item.Type == "tool_search_call" && name == "" {
+				name = "tool_search"
 			}
 			b.add("assistant", "assistant", anthropicBlock{
-				"type": "tool_use", "id": item.CallID, "name": item.Name, "input": input,
+				"type": "tool_use", "id": item.CallID, "name": name, "input": input,
 			})
 		case "custom_tool_call":
+			hasToolHistory = true
 			args := item.Arguments
 			if args == "" && item.Input != "" {
 				args = item.Input
@@ -545,40 +570,67 @@ func fromResponses(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupp
 			b.add("assistant", "assistant", anthropicBlock{
 				"type": "tool_use", "id": item.CallID, "name": item.Name, "input": input,
 			})
-		case "function_call_output", "custom_tool_call_output":
-			text, eErr := shared.RespOutputText(item.Output, "tool messages carry text only")
+		case "function_call_output", "custom_tool_call_output", "tool_search_output":
+			hasToolHistory = true
+			content, eErr := toolResultContent(item.Output)
 			if eErr != nil {
 				return nil, eErr
 			}
 			b.add("user:tool", "user", anthropicBlock{
-				"type": "tool_result", "tool_use_id": item.CallID, "content": text,
+				"type": "tool_result", "tool_use_id": item.CallID, "content": content,
 			})
 		case "reasoning":
-			// Best-effort: keep summary text as a thinking block;
-			// encrypted_content has no Anthropic equivalent, so the
-			// signature is omitted rather than fabricated (FR-005).
-			var sb strings.Builder
-			for i, s := range item.Summary {
-				if i > 0 {
-					sb.WriteString("\n")
-				}
-				sb.WriteString(s.Text)
+			// Bridge-owned signed blocks are replayable. A Responses item
+			// carrying OpenAI ciphertext is wrapped into a signature that
+			// this plugin restores on the next Claude turn; a bare summary
+			// is still visible thinking without a signature.
+			if block, ok := shared.ThinkingBlockFromReasoningItem(item); ok {
+				b.add("assistant", "assistant", anthropicBlock(block))
+				hasSignedThinking = true
+			} else if block, ok := shared.ThinkingBlockFromOpenAIReasoning(item); ok {
+				b.add("assistant", "assistant", anthropicBlock(block))
 			}
-			if sb.Len() > 0 {
-				b.add("assistant", "assistant", anthropicBlock{
-					"type": "thinking", "thinking": sb.String(),
-				})
+		case "input_text":
+			if strings.TrimSpace(item.Text) != "" {
+				b.add("user", "user", textBlock(item.Text))
+			}
+		case "input_image":
+			url, eErr := shared.OpenAIImageURL(item.ImageURL)
+			if eErr != nil {
+				return nil, eErr
+			}
+			src, eErr := shared.ImageSource(url)
+			if eErr != nil {
+				return nil, eErr
+			}
+			b.add("user", "user", src)
+		case "compaction", "compaction_summary", "context_compaction":
+			text := strings.TrimSpace(item.Text)
+			if text == "" {
+				var sb strings.Builder
+				for i, s := range item.Summary {
+					if i > 0 {
+						sb.WriteString("\n")
+					}
+					sb.WriteString(s.Text)
+				}
+				text = strings.TrimSpace(sb.String())
+			}
+			if text != "" {
+				b.add("user", "user", textBlock(text))
 			}
 		default:
 			return nil, shared.UnsupportedInputItemType(item.Type)
 		}
 	}
 	b.flush()
-	req.Messages = b.msgs
+	req.Messages = sanitizeAnthropicMessages(b.msgs)
 
 	for _, t := range src.Tools {
-		if eErr := shared.FunctionTool(t.Type, EndpointPath); eErr != nil {
-			return nil, eErr
+		// Normalize has already flattened function/custom/namespace tools;
+		// hosted tools have no Anthropic function equivalent.
+		if t.Type != "function" {
+			continue
 		}
 		schema := shared.ObjectSchema(t.Parameters)
 		req.Tools = append(req.Tools, anthropicTool{
@@ -596,7 +648,233 @@ func fromResponses(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupp
 	if eErr := applyToolChoiceMessages(req, kind, tcName, src.ParallelToolCalls); eErr != nil {
 		return nil, eErr
 	}
-	return finalize(req, system, effort, ts)
+	return finalize(req, system, effort, ts, !hasToolHistory || hasSignedThinking)
+}
+
+// toolResultContent renders a Responses function_call_output as Anthropic
+// tool_result content: a plain string when it is text-only, or a block array
+// when it carries images. Images are preserved instead of failing the turn.
+func toolResultContent(raw json.RawMessage) (any, *errclass.Error) {
+	if !shared.HasContent(raw) {
+		return "", nil
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s, nil
+	}
+	var parts []struct {
+		Type     string          `json:"type"`
+		Text     string          `json:"text"`
+		ImageURL json.RawMessage `json:"image_url"`
+	}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return nil, errclass.Translation("tool output must be a string or an array of content parts")
+	}
+	var text strings.Builder
+	blocks := make([]anthropicBlock, 0, len(parts))
+	hasImg := false
+	for _, p := range parts {
+		switch p.Type {
+		case "input_text", "output_text", "text":
+			text.WriteString(p.Text)
+			blocks = append(blocks, textBlock(p.Text))
+		case "input_image":
+			url, eErr := shared.OpenAIImageURL(p.ImageURL)
+			if eErr != nil {
+				return nil, eErr
+			}
+			src, eErr := shared.ImageSource(url)
+			if eErr != nil {
+				return nil, eErr
+			}
+			blocks = append(blocks, src)
+			hasImg = true
+		default:
+			return nil, errclass.Translation("unsupported tool output part type " + p.Type)
+		}
+	}
+	if !hasImg {
+		return text.String(), nil
+	}
+	return blocks, nil
+}
+
+// sanitizeAnthropicMessages enforces the history invariants Anthropic
+// rejects at request time: non-empty messages, a leading user turn, complete
+// assistant tool_use → user tool_result pairs, and no trailing assistant
+// whitespace prefill. It is deliberately a single pass over the converted
+// history; the client's original order is preserved otherwise.
+func sanitizeAnthropicMessages(msgs []anthropicMessage) []anthropicMessage {
+	out := make([]anthropicMessage, 0, len(msgs))
+	for _, msg := range msgs {
+		blocks := anthropicBlocksOf(msg.Content)
+		if len(blocks) == 0 {
+			continue
+		}
+		if msg.Role == "assistant" && hasToolUseBlock(blocks) {
+			// A tool_use turn must not carry unsigned thinking: Anthropic
+			// rejects it, and a foreign provider's unsigned reasoning has
+			// no replayable signature.
+			kept := blocks[:0]
+			for _, blk := range blocks {
+				switch blk["type"] {
+				case "thinking":
+					if sig, _ := blk["signature"].(string); sig == "" {
+						continue
+					}
+				case "redacted_thinking":
+					if data, _ := blk["data"].(string); data == "" {
+						continue
+					}
+				}
+				kept = append(kept, blk)
+			}
+			blocks = kept
+			if len(blocks) == 0 {
+				continue
+			}
+		}
+		msg.Content = blocks
+		out = append(out, msg)
+	}
+	// Drop an assistant tool_use turn unless the immediately next user turn
+	// answers every call. A partial turn would otherwise 400.
+	cleaned := make([]anthropicMessage, 0, len(out))
+	for i := 0; i < len(out); i++ {
+		msg := out[i]
+		ids := toolUseIDs(msg)
+		if msg.Role != "assistant" || len(ids) == 0 {
+			cleaned = append(cleaned, msg)
+			continue
+		}
+		var next *anthropicMessage
+		if i+1 < len(out) && out[i+1].Role == "user" {
+			next = &out[i+1]
+		}
+		resultIDs := toolResultIDs(next)
+		if completeToolPair(ids, resultIDs) {
+			cleaned = append(cleaned, msg)
+			continue
+		}
+		// Keep the user turn's non-tool content, drop the unmatched results.
+		if next != nil {
+			if stripped := stripToolResults(*next); len(anthropicBlocksOf(stripped.Content)) > 0 {
+				cleaned = append(cleaned, stripped)
+			}
+			i++
+		}
+	}
+	out = cleaned
+	if len(out) > 0 && out[0].Role != "user" {
+		out = append([]anthropicMessage{{Role: "user", Content: "(continuing the conversation)"}}, out...)
+	}
+	if len(out) > 0 && out[len(out)-1].Role == "assistant" {
+		last := &out[len(out)-1]
+		blocks := anthropicBlocksOf(last.Content)
+		if len(blocks) > 0 {
+			if text, ok := blocks[len(blocks)-1]["text"].(string); ok {
+				blocks[len(blocks)-1]["text"] = strings.TrimRight(text, " 	\r\n")
+			}
+			last.Content = blocks
+		}
+		if len(anthropicBlocksOf(last.Content)) == 0 {
+			out = out[:len(out)-1]
+		}
+	}
+	// Preserve the compact one-text-block form (a JSON string) so the
+	// wire shape stays byte-stable across sanitization.
+	for i := range out {
+		blocks := anthropicBlocksOf(out[i].Content)
+		if len(blocks) == 1 && blocks[0]["type"] == "text" {
+			if text, ok := blocks[0]["text"].(string); ok {
+				out[i].Content = text
+			}
+		}
+	}
+	return out
+}
+
+func anthropicBlocksOf(content any) []anthropicBlock {
+	switch v := content.(type) {
+	case nil:
+		return nil
+	case string:
+		if v == "" {
+			return nil
+		}
+		return []anthropicBlock{textBlock(v)}
+	case []anthropicBlock:
+		return v
+	case anthropicBlock:
+		return []anthropicBlock{v}
+	default:
+		return nil
+	}
+}
+
+func toolUseIDs(msg anthropicMessage) []string {
+	var ids []string
+	for _, blk := range anthropicBlocksOf(msg.Content) {
+		if blk["type"] == "tool_use" {
+			if id, ok := blk["id"].(string); ok && id != "" {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
+func hasToolUseBlock(blocks []anthropicBlock) bool {
+	for _, blk := range blocks {
+		if blk["type"] == "tool_use" {
+			return true
+		}
+	}
+	return false
+}
+
+func toolResultIDs(msg *anthropicMessage) []string {
+	if msg == nil {
+		return nil
+	}
+	var ids []string
+	for _, blk := range anthropicBlocksOf(msg.Content) {
+		if blk["type"] == "tool_result" {
+			if id, ok := blk["tool_use_id"].(string); ok && id != "" {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
+func completeToolPair(uses, results []string) bool {
+	if len(uses) == 0 || len(results) == 0 || len(uses) != len(results) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(uses))
+	for _, id := range uses {
+		seen[id] = struct{}{}
+	}
+	for _, id := range results {
+		if _, ok := seen[id]; !ok {
+			return false
+		}
+		delete(seen, id)
+	}
+	return len(seen) == 0
+}
+
+func stripToolResults(msg anthropicMessage) anthropicMessage {
+	blocks := anthropicBlocksOf(msg.Content)
+	kept := make([]anthropicBlock, 0, len(blocks))
+	for _, blk := range blocks {
+		if blk["type"] != "tool_result" {
+			kept = append(kept, blk)
+		}
+	}
+	msg.Content = kept
+	return msg
 }
 
 // applyToolChoiceMessages maps a normalized tool choice onto the outbound
@@ -607,6 +885,19 @@ func fromResponses(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupp
 // the synthesized or decoded tool_choice — synthesized as {"type":"auto"}
 // when no tool_choice was sent, so the flag never rides alone.
 func applyToolChoiceMessages(req *messagesRequest, kind, name string, parallel *bool) *errclass.Error {
+	// "none" has no Anthropic representation regardless of whether tools
+	// were supplied; fail descriptively before the tool-less drop.
+	if kind == shared.ToolChoiceNone {
+		return &errclass.Error{
+			Class:   errclass.ClassUnsupported,
+			Message: fmt.Sprintf("tool_choice %q cannot be represented for %s", kind, EndpointPath),
+		}
+	}
+	if len(req.Tools) == 0 {
+		// Anthropic rejects tool_choice without tools; dropping it is the
+		// only valid representation of a request whose tools all vanished.
+		return nil
+	}
 	noParallel := parallel != nil && !*parallel
 	if kind == shared.ToolChoiceAbsent && noParallel {
 		kind = shared.ToolChoiceAuto

@@ -128,6 +128,21 @@ func (t *ResponseTools) IsCustom(name string) bool {
 	return false
 }
 
+// RegisterCustomTool records a tool that was forwarded verbatim on a native
+// Responses request, so the return path can restore a function_call item to
+// custom_tool_call when the upstream answers that way.
+func (t *ResponseTools) RegisterCustomTool(name string) {
+	if t == nil || strings.TrimSpace(name) == "" {
+		return
+	}
+	if t.names == nil {
+		t.names = make(map[string]responseToolIdentity)
+	}
+	if _, exists := t.names[name]; !exists {
+		t.names[name] = responseToolIdentity{name: name, isCustom: true}
+	}
+}
+
 // UnwrapCustomToolInput extracts the input string from custom tool call
 // arguments: a JSON object with properties like "input", "code", or "arguments"
 // unwraps to that raw string value, otherwise the arguments pass through verbatim.

@@ -403,9 +403,14 @@ func TestFromChatCompletionsFull(t *testing.T) {
 
 func TestFromChatCompletionsTokenFallbacks(t *testing.T) {
 	msg := `{"messages":[{"role":"user","content":"hi"}]`
-	out := mustBuild(t, "m", "openai", []byte(msg+`,"max_tokens":10}`), nil)
-	if m := decodeReq(t, out); m["max_output_tokens"] != float64(10) {
+	out := mustBuild(t, "m", "openai", []byte(msg+`,"max_tokens":20}`), nil)
+	if m := decodeReq(t, out); m["max_output_tokens"] != float64(20) {
 		t.Errorf("max_tokens lost: %v", m)
+	}
+	// Responses rejects max_output_tokens < 16; Claude Desktop probes with 1.
+	out = mustBuild(t, "m", "openai", []byte(msg+`,"max_tokens":1}`), nil)
+	if m := decodeReq(t, out); m["max_output_tokens"] != float64(16) {
+		t.Errorf("max_tokens floor missing: %v", m)
 	}
 	out = mustBuild(t, "m", "openai", []byte(msg+`,"max_tokens":0,"max_completion_tokens":20}`), nil)
 	if m := decodeReq(t, out); m["max_output_tokens"] != float64(20) {
@@ -675,7 +680,7 @@ func TestClaudeImageDefaultMediaType(t *testing.T) {
 
 func TestClaudeToolChoiceMappings(t *testing.T) {
 	build := func(choice string) map[string]any {
-		body := fmt.Sprintf(`{"max_tokens":16,%s"messages":[{"role":"user","content":"hi"}]}`, choice)
+		body := fmt.Sprintf(`{"max_tokens":16,"tools":[{"name":"f","input_schema":{"type":"object"}}],%s"messages":[{"role":"user","content":"hi"}]}`, choice)
 		return decodeReq(t, mustBuild(t, "m", "claude", []byte(body), nil))
 	}
 	if got := build(`"tool_choice":{"type":"auto"},`)["tool_choice"]; got != "auto" {
@@ -698,12 +703,12 @@ func TestClaudeToolChoiceMappings(t *testing.T) {
 // empty-name function choice.
 func TestClaudeToolChoiceSharedSemantics(t *testing.T) {
 	m := decodeReq(t, mustBuild(t, "m", "claude",
-		[]byte(`{"max_tokens":10,"tool_choice":"auto","messages":[{"role":"user","content":"hi"}]}`), nil))
+		[]byte(`{"max_tokens":10,"tools":[{"name":"f","input_schema":{"type":"object"}}],"tool_choice":"auto","messages":[{"role":"user","content":"hi"}]}`), nil))
 	if m["tool_choice"] != "auto" {
 		t.Fatalf("bare string auto = %v", m["tool_choice"])
 	}
 	_, eErr := BuildRequest("m", "claude", []byte(
-		`{"max_tokens":10,"tool_choice":{"type":"tool"},"messages":[]}`), nil)
+		`{"max_tokens":10,"tools":[{"name":"f","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool"},"messages":[]}`), nil)
 	wantErr(t, eErr, errclass.ClassTranslation)
 }
 
@@ -779,8 +784,7 @@ func TestFromClaudeMessagesErrors(t *testing.T) {
 		{"image base64 source empty", `{"max_tokens":10,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64"}}]}]}`, errclass.ClassTranslation},
 		{"image unknown source type", `{"max_tokens":10,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"s3"}}]}]}`, errclass.ClassTranslation},
 		{"malformed tool_result payload", `{"max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":42}]}]}`, errclass.ClassTranslation},
-		{"image inside tool_result rejected", `{"max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"image","source":{"type":"url","url":"https://x/i.png"}}]}]}]}`, errclass.ClassTranslation},
-		{"unsupported block type", `{"max_tokens":10,"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"type":"document","source":{"type":"text"}}]}]}`, errclass.ClassUnsupported},
+		{"unsupported block type", `{"max_tokens":10,"messages":[{"role":"user","content":[{"type":"text","text":"a"},{"type":"audio"}]}]}`, errclass.ClassUnsupported},
 		{"malformed tool_choice", `{"max_tokens":10,"tool_choice":42}`, errclass.ClassTranslation},
 		{"unknown tool_choice type", `{"max_tokens":10,"tool_choice":{"type":"blowup"}}`, errclass.ClassTranslation},
 	}
@@ -790,13 +794,26 @@ func TestFromClaudeMessagesErrors(t *testing.T) {
 			wantErr(t, eErr, tc.class)
 		})
 	}
-	// The tool_result image rejection names the target field, mirroring
-	// the Chat Completions route's wording style — never silent loss.
-	_, eErr := BuildRequest("m", "claude", []byte(
-		`{"max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"image","source":{"type":"url","url":"https://x/i.png"}}]}]}]}`), nil)
-	if eErr == nil || eErr.Class != errclass.ClassTranslation ||
-		!strings.Contains(eErr.Message, "function_call_output carries text only") {
-		t.Fatalf("tool_result image not rejected descriptively: %+v", eErr)
+}
+
+// Tool results may carry images and documents; the Responses conversion keeps
+// them as input_image/input_file parts instead of rejecting text-only.
+func TestFromClaudeMessagesRichToolAndDocumentParts(t *testing.T) {
+	body := `{"max_tokens":10,"messages":[{"role":"user","content":[` +
+		`{"type":"tool_result","tool_use_id":"t","content":[{"type":"text","text":"see"},{"type":"image","source":{"type":"url","url":"https://x/i.png"}}]},` +
+		`{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"QQ=="},"title":"spec"}]}]}`
+	m := decodeReq(t, mustBuild(t, "m", "claude", []byte(body), nil))
+	items := inputItems(t, m)
+	if len(items) != 2 {
+		t.Fatalf("items = %d: %v", len(items), items)
+	}
+	out, ok := items[0].(map[string]any)["output"].([]any)
+	if !ok || len(out) != 2 || out[1].(map[string]any)["type"] != "input_image" {
+		t.Fatalf("tool_result output = %v", items[0])
+	}
+	part := partMap(t, itemMap(t, items, 1), 0)
+	if part["type"] != "input_file" || part["filename"] != "spec" {
+		t.Fatalf("document part = %v", part)
 	}
 }
 
@@ -830,7 +847,8 @@ func TestFromChatCompletionsEmptyToolArguments(t *testing.T) {
 // {type:function,name} shape /v1/responses expects; "none" maps to the
 // Responses-native "none" exactly like the claude leg (protocol parity).
 func TestFromChatCompletionsToolChoiceShapes(t *testing.T) {
-	out, eErr := BuildRequest("m", "openai", []byte(`{"tool_choice":{"type":"function","function":{"name":"x"}},"messages":[]}`), nil)
+	tools := `"tools":[{"type":"function","function":{"name":"x","parameters":{"type":"object"}}}],`
+	out, eErr := BuildRequest("m", "openai", []byte(`{`+tools+`"tool_choice":{"type":"function","function":{"name":"x"}},"messages":[]}`), nil)
 	if eErr != nil {
 		t.Fatalf("nested named: %v", eErr)
 	}
@@ -839,7 +857,7 @@ func TestFromChatCompletionsToolChoiceShapes(t *testing.T) {
 		t.Fatalf("flat named form = %v", tc)
 	}
 
-	mNone, eErr := BuildRequest("m", "openai", []byte(`{"tool_choice":"none","messages":[]}`), nil)
+	mNone, eErr := BuildRequest("m", "openai", []byte(`{`+tools+`"tool_choice":"none","messages":[]}`), nil)
 	if eErr != nil {
 		t.Fatalf("none: %v", eErr)
 	}
@@ -848,21 +866,21 @@ func TestFromChatCompletionsToolChoiceShapes(t *testing.T) {
 	}
 
 	// any/required → "required"; malformed tool_choice JSON → translation.
-	mAny, eErr := BuildRequest("m", "openai", []byte(`{"tool_choice":"any","messages":[]}`), nil)
+	mAny, eErr := BuildRequest("m", "openai", []byte(`{`+tools+`"tool_choice":"any","messages":[]}`), nil)
 	if eErr != nil {
 		t.Fatalf("any: %v", eErr)
 	}
 	if tc := decodeReq(t, mAny)["tool_choice"]; tc != "required" {
 		t.Fatalf("any tool_choice = %v", tc)
 	}
-	out, eErr = BuildRequest("m", "openai", []byte(`{"tool_choice":"required","messages":[]}`), nil)
+	out, eErr = BuildRequest("m", "openai", []byte(`{`+tools+`"tool_choice":"required","messages":[]}`), nil)
 	if eErr != nil {
 		t.Fatalf("required: %v", eErr)
 	}
 	if tc := decodeReq(t, out)["tool_choice"]; tc != "required" {
 		t.Fatalf("required tool_choice = %v", tc)
 	}
-	_, eErr = BuildRequest("m", "openai", []byte(`{"tool_choice":42,"messages":[]}`), nil)
+	_, eErr = BuildRequest("m", "openai", []byte(`{`+tools+`"tool_choice":42,"messages":[]}`), nil)
 	if eErr == nil || eErr.Class != errclass.ClassTranslation ||
 		!strings.Contains(eErr.Message, "malformed tool_choice") {
 		t.Fatalf("malformed err = %v", eErr)

@@ -151,7 +151,9 @@ var defaultFallbackRoutes = []config.FallbackRoute{
 // fallbackRoute resolves an unlisted model by family prefix.
 func (m *Manager) fallbackRoute(upstreamID string) (Route, bool) {
 	routes := m.cfg.FallbackRoutes
-	if len(routes) == 0 {
+	if routes == nil {
+		// nil means "not configured": keep the built-in family table.
+		// An explicitly empty list means the operator disabled guessing.
 		routes = defaultFallbackRoutes
 	}
 	lower := strings.ToLower(upstreamID)
@@ -292,6 +294,7 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 	var warns []string
 	warns = append(warns, extraWarns...)
 	seen := make(map[string]bool, len(entries))
+modelLoop:
 	for _, e := range entries {
 		if e.ID == "" {
 			unsup = append(unsup, UnsupportedModel{Reason: "missing id"})
@@ -320,6 +323,9 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			})
 			continue
 		}
+		if endpoint == "" {
+			endpoint = m.endpointPath(route)
+		}
 		if endpoint != "" && endpointEscapesBase(m.cfg.BaseURL, endpoint) {
 			// The joined URL must stay on the configured upstream
 			// authority. Override endpoints flow through here, so they
@@ -333,8 +339,19 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			})
 			continue
 		}
-		if endpoint == "" {
-			endpoint = route.EndpointPath()
+		// Resolve every protocol this model speaks, including protocols that
+		// are only reachable through pass-through. The executor reads this
+		// map, so a per-model endpoint override must be published here too.
+		endpointPaths := m.endpointPathsFor(e.ID)
+		for protocol, path := range endpointPaths {
+			if path == "" || !endpointEscapesBase(m.cfg.BaseURL, path) {
+				continue
+			}
+			unsup = append(unsup, UnsupportedModel{
+				UpstreamID: e.ID,
+				Reason:     fmt.Sprintf("resolved %s endpoint escapes the configured upstream host", protocol),
+			})
+			continue modelLoop
 		}
 		inputModes := firstNonEmpty(e.InputModes, e.InputModalities)
 		outputModes := firstNonEmpty(e.OutputModes, e.OutputModalities)
@@ -349,6 +366,7 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			Protocol:           route,
 			SupportedProtocols: m.supportedProtocolsFor(e.ID),
 			ReasoningShape:     m.reasoningShapeFor(e.ID),
+			EndpointPaths:      endpointPaths,
 			EndpointPath:       endpoint,
 			ContextLimit:       e.ContextLength,
 			OutputLimit:        e.MaxOutputTokens,

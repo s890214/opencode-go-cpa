@@ -19,11 +19,14 @@ import (
 // ---- upstream Anthropic Messages response shapes (decode-only) ----
 
 type claudeBlockIn struct {
-	Type  string          `json:"type"` // text | thinking | tool_use | ...
-	Text  string          `json:"text"`
-	ID    string          `json:"id"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
+	Type      string          `json:"type"` // text | thinking | redacted_thinking | tool_use | ...
+	Text      string          `json:"text"`
+	Thinking  string          `json:"thinking"`
+	Signature string          `json:"signature"`
+	Data      string          `json:"data"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
 }
 
 type claudeUsageIn struct {
@@ -106,11 +109,14 @@ func claudeToChat(body []byte) ([]byte, *errclass.Error) {
 			tc.Function.Arguments = string(args)
 			msg.ToolCalls = append(msg.ToolCalls, tc)
 		case "thinking", "redacted_thinking":
-			// FR-005 explicit omission policy: no standard Chat
-			// Completions reasoning field; dropped rather than put in a
-			// non-standard one. redacted_thinking is pure encrypted
-			// reasoning metadata, omitted like the stream path instead of
-			// failing the conversion.
+			// Chat Completions has no standard reasoning field, but
+			// DeepSeek/MiMo clients read reasoning_content; preserve the
+			// model's thinking instead of dropping it.
+			if blk.Type == "thinking" && blk.Thinking != "" {
+				msg.ReasoningContent = blk.Thinking
+			} else if blk.Type == "redacted_thinking" {
+				msg.ReasoningContent = "[redacted thinking]"
+			}
 		default:
 			return nil, errclass.Translation(fmt.Sprintf(
 				"%s output cannot represent %q content blocks", EndpointPath, blk.Type))
@@ -188,8 +194,16 @@ func claudeToResponses(body []byte, tools ...*shared.ResponseTools) ([]byte, *er
 		case "tool_use":
 			args, _ := json.Marshal(decodeBlockInput(blk.Input))
 			oa.AppendFunctionCall(blk.ID, blk.Name, string(args))
-		case "thinking", "redacted_thinking":
-			// FR-005 explicit omission policy (see claudeToChat).
+		case "thinking":
+			block := map[string]any{"type": "thinking", "thinking": blk.Thinking, "signature": blk.Signature}
+			if item, ok := shared.ReasoningItemFromThinkingBlock(resp.ID+"-rs-"+blk.ID, block); ok {
+				oa.AppendReasoning(item)
+			}
+		case "redacted_thinking":
+			block := map[string]any{"type": "redacted_thinking", "data": blk.Data}
+			if item, ok := shared.ReasoningItemFromThinkingBlock(resp.ID+"-rs-"+blk.ID, block); ok {
+				oa.AppendReasoning(item)
+			}
 		default:
 			return nil, errclass.Translation(fmt.Sprintf(
 				"%s output cannot represent %q content blocks", EndpointPath, blk.Type))

@@ -197,7 +197,7 @@ func pluginConfigFields() []pluginapi.ConfigField {
 		{
 			Name:        "base-url",
 			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Upstream base URL (default: https://opencode.ai/inference/go/v1).",
+			Description: "Upstream service root (default: https://opencode.ai/inference/go). Protocol paths are appended verbatim.",
 		},
 		{
 			Name:        "catalog-url",

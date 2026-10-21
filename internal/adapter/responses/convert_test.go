@@ -349,22 +349,26 @@ func TestConvertResponsesUnknownOutputItem(t *testing.T) {
 	}
 }
 
-// Reasoning output items (emitted whenever Luna reasons) are informational
-// and are omitted per the FR-005/FR-006 compatibility policy — matching
-// the stream side — instead of failing the whole conversion.
-func TestConvertResponsesReasoningItemOmitted(t *testing.T) {
+// Reasoning output items are preserved: Chat clients read reasoning_content,
+// Claude clients read a visible thinking block (unsigned when the upstream
+// supplied only a summary). Dropping the model's thinking is never silent.
+func TestConvertResponsesReasoningItemPreserved(t *testing.T) {
 	body := strings.Replace(respTextOnly,
 		`"output":[{"type":"message"`,
 		`"output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"pondering"}]},{"type":"message"`, 1)
-	for _, format := range []string{"openai", "claude"} {
-		out, eErr := ConvertNonStreamResponse(format, 200, []byte(body))
-		if eErr != nil {
-			t.Fatalf("%s: reasoning item errored: %v", format, eErr)
-		}
-		if !strings.Contains(string(out), `"hi there"`) ||
-			strings.Contains(string(out), "pondering") {
-			t.Fatalf("%s: reasoning item not omitted cleanly: %s", format, out)
-		}
+	out, eErr := ConvertNonStreamResponse("openai", 200, []byte(body))
+	if eErr != nil {
+		t.Fatalf("openai: reasoning item errored: %v", eErr)
+	}
+	if !strings.Contains(string(out), `"hi there"`) || !strings.Contains(string(out), `"reasoning_content":"pondering"`) {
+		t.Fatalf("openai: reasoning not preserved: %s", out)
+	}
+	out, eErr = ConvertNonStreamResponse("claude", 200, []byte(body))
+	if eErr != nil {
+		t.Fatalf("claude: reasoning item errored: %v", eErr)
+	}
+	if !strings.Contains(string(out), `"hi there"`) || !strings.Contains(string(out), `"thinking":"pondering"`) {
+		t.Fatalf("claude: reasoning not preserved: %s", out)
 	}
 }
 

@@ -334,7 +334,6 @@ func TestChatCompletionsErrors(t *testing.T) {
 	}{
 		{"malformed json", `{`},
 		{"bad stop", `{"messages":[],"stop":123}`},
-		{"malformed tool args", `{"messages":[{"role":"assistant","tool_calls":[{"id":"c","function":{"name":"f","arguments":"{oops"}}]}]}`},
 		{"system image", `{"messages":[{"role":"system","content":[{"type":"image_url","image_url":{"url":"https://e.com/x"}}]}]}`},
 		{"assistant image", `{"messages":[{"role":"assistant","content":[{"type":"image_url","image_url":{"url":"https://e.com/x"}}]}]}`},
 		{"bad data url", `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:nocomma"}}]}]}`},
@@ -347,6 +346,16 @@ func TestChatCompletionsErrors(t *testing.T) {
 		if eErr == nil || eErr.Class != errclass.ClassTranslation {
 			t.Errorf("%s: want ClassTranslation, got %+v", c.name, eErr)
 		}
+	}
+	// Historical malformed tool arguments must not fail the turn: they
+	// degrade to an empty object so the conversation still continues.
+	m, eErr := chatReq(t, `{"messages":[{"role":"user","content":"go"},{"role":"assistant","tool_calls":[{"id":"c","function":{"name":"f","arguments":"{oops"}}]},{"role":"tool","tool_call_id":"c","content":"ok"}]}`)
+	if eErr != nil {
+		t.Fatalf("malformed history should degrade, got %+v", eErr)
+	}
+	block := m["messages"].([]any)[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if block["type"] != "tool_use" || len(block["input"].(map[string]any)) != 0 {
+		t.Fatalf("malformed args not normalized: %v", block)
 	}
 	// Unknown roles and part types are unsupported_protocol_or_parameter
 	// (FR-009 kernel), not translation failures.
@@ -361,7 +370,7 @@ func TestChatCompletionsErrors(t *testing.T) {
 		}
 	}
 	// A non-function tool type is unsupported_protocol_or_parameter (FR-009).
-	_, eErr := chatReq(t, `{"tools":[{"type":"web_search"}],"messages":[]}`)
+	_, eErr = chatReq(t, `{"tools":[{"type":"web_search"}],"messages":[]}`)
 	if eErr == nil || eErr.Class != errclass.ClassUnsupported {
 		t.Errorf("unknown tool type: want ClassUnsupported, got %+v", eErr)
 	}
@@ -415,8 +424,7 @@ func TestResponsesItems(t *testing.T) {
 			]},
 			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"calling"}]},
 			{"type":"function_call","call_id":"fc_1","name":"f","arguments":"{\"a\":1}"},
-			{"type":"function_call_output","call_id":"fc_1","output":"out"},
-			{"type":"reasoning","summary":[{"type":"summary_text","text":"thought A"},{"type":"summary_text","text":"thought B"}]}
+			{"type":"function_call_output","call_id":"fc_1","output":"out"}
 		],
 		"tools":[{"type":"function","name":"f","description":"fd","parameters":{"type":"object"}}],
 		"reasoning":{"effort":"low"}
@@ -432,8 +440,8 @@ func TestResponsesItems(t *testing.T) {
 		t.Errorf("system = %v", m["system"])
 	}
 	msgs := m["messages"].([]any)
-	// user(img), assistant(text+tool_use merged? no: text then tool_use in same assistant bucket), user tool_result, assistant thinking
-	if len(msgs) != 4 {
+	// user(img), assistant(text+tool_use merged), user tool_result
+	if len(msgs) != 3 {
 		t.Fatalf("messages = %d: %v", len(msgs), msgs)
 	}
 	first := msgs[0].(map[string]any)
@@ -457,17 +465,33 @@ func TestResponsesItems(t *testing.T) {
 	if out["type"] != "tool_result" || out["tool_use_id"] != "fc_1" || out["content"] != "out" {
 		t.Errorf("function_call_output block = %v", out)
 	}
-	th := msgs[3].(map[string]any)["content"].([]any)[0].(map[string]any)
-	if th["type"] != "thinking" || th["thinking"] != "thought A\nthought B" {
-		t.Errorf("reasoning block = %v", th)
-	}
-	thb := m["thinking"].(map[string]any)
-	if thb["budget_tokens"] != float64(1024) { // nil ts: low → lowest anchor
-		t.Errorf("thinking budget = %v", thb)
-	}
 	tool := m["tools"].([]any)[0].(map[string]any)
 	if tool["name"] != "f" || tool["description"] != "fd" {
 		t.Errorf("tool = %v", tool)
+	}
+}
+
+// Reasoning-only history becomes a thinking block; with no tool turn there is
+// no signature requirement, so the summary is preserved verbatim.
+func TestResponsesReasoningBlockPreserved(t *testing.T) {
+	body := `{
+		"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"thought A"},{"type":"summary_text","text":"thought B"}]}],
+		"reasoning":{"effort":"low"}
+	}`
+	m, eErr := respReq(t, body)
+	if eErr != nil {
+		t.Fatalf("unexpected error: %v", eErr)
+	}
+	msgs := m["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %d: %v", len(msgs), msgs)
+	}
+	th := msgs[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if th["type"] != "thinking" || th["thinking"] != "thought A\nthought B" {
+		t.Errorf("reasoning block = %v", th)
+	}
+	if thb := m["thinking"].(map[string]any); thb["budget_tokens"] != float64(1024) {
+		t.Errorf("thinking budget = %v", thb)
 	}
 }
 
@@ -484,10 +508,13 @@ func TestFromResponsesRequest_FunctionCallOutputArray(t *testing.T) {
 		t.Fatalf("unexpected error: %v", eErr)
 	}
 	msgs := m["messages"].([]any)
-	if len(msgs) != 2 {
+	if len(msgs) != 3 {
 		t.Fatalf("messages = %d: %v", len(msgs), msgs)
 	}
-	out := msgs[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if first := msgs[0].(map[string]any); first["role"] != "user" || first["content"] != "(continuing the conversation)" {
+		t.Fatalf("leading synthetic user missing: %v", first)
+	}
+	out := msgs[2].(map[string]any)["content"].([]any)[0].(map[string]any)
 	if out["type"] != "tool_result" || out["tool_use_id"] != "c1" || out["content"] != "file contents" {
 		t.Errorf("function_call_output block = %v", out)
 	}
@@ -561,13 +588,22 @@ func TestResponsesErrors(t *testing.T) {
 		{"input neither string nor array", `{"input":123}`},
 		{"assistant image", `{"input":[{"type":"message","role":"assistant","content":[{"type":"image_url","image_url":{"url":"u"}}]}]}`},
 		{"system image", `{"input":[{"type":"message","role":"system","content":[{"type":"image_url","image_url":{"url":"u"}}]}]}`},
-		{"bad function args", `{"input":[{"type":"function_call","call_id":"c","name":"f","arguments":"nope"}]}`},
 	}
 	for _, c := range cases {
 		_, eErr := respReq(t, c.body)
 		if eErr == nil || eErr.Class != errclass.ClassTranslation {
 			t.Errorf("%s: want ClassTranslation, got %+v", c.name, eErr)
 		}
+	}
+	// A malformed historical function_call degrades to empty input instead
+	// of failing the whole conversion (tool-loop continuity).
+	badArgs, eErr := respReq(t, `{"input":[{"type":"message","role":"user","content":"go"},{"type":"function_call","call_id":"c","name":"f","arguments":"nope"},{"type":"function_call_output","call_id":"c","output":"ok"}]}`)
+	if eErr != nil {
+		t.Fatalf("bad function args should degrade: %+v", eErr)
+	}
+	block := badArgs["messages"].([]any)[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if block["type"] != "tool_use" || len(block["input"].(map[string]any)) != 0 {
+		t.Fatalf("bad args not normalized: %v", block)
 	}
 	// Unknown roles, part types, and input item types are
 	// unsupported_protocol_or_parameter (FR-009 kernel), not translation failures.
@@ -847,7 +883,7 @@ func TestChatCompletionsToolChoicePreserved(t *testing.T) {
 }
 
 func TestResponsesToolChoicePreserved(t *testing.T) {
-	m, eErr := respReq(t, `{"tool_choice":"auto","input":[]}`)
+	m, eErr := respReq(t, `{"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":"auto","input":[]}`)
 	if eErr != nil {
 		t.Fatalf("auto: %v", eErr)
 	}
@@ -912,7 +948,7 @@ func TestParallelFalseSynthesizesAutoToolChoice(t *testing.T) { // row 2
 		t.Fatalf("chat tool_choice = %v", tc)
 	}
 
-	m, eErr = respReq(t, `{"input":[],"parallel_tool_calls":false}`)
+	m, eErr = respReq(t, `{"input":[],"tools":[{"type":"function","name":"f","parameters":{"type":"object"}}],"parallel_tool_calls":false}`)
 	if eErr != nil {
 		t.Fatalf("responses: %v", eErr)
 	}
