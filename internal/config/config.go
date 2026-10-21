@@ -133,6 +133,8 @@ type Config struct {
 	Models map[string]ModelConfig
 	// ProtocolEndpoints overrides each protocol's default path.
 	ProtocolEndpoints map[string]string
+	// QuotaPath is where the usage endpoint lives, relative to base-url.
+	QuotaPath string
 	// FallbackRoutes resolves a model that `models` does not mention.
 	FallbackRoutes   []FallbackRoute
 	AllowHTTP        bool
@@ -152,6 +154,7 @@ type rawConfig struct {
 	Protocols          rawProtocols              `yaml:"protocols"`
 	Models             map[string]rawModelConfig `yaml:"models"`
 	ProtocolEndpoints  map[string]string         `yaml:"protocol-endpoints"`
+	QuotaPath          *string                   `yaml:"quota-path"`
 	FallbackRoutes     []FallbackRoute           `yaml:"fallback-routes"`
 	RouteOverrides     map[string]RouteOverride  `yaml:"route-overrides"`
 	ProtocolPreference map[string][]string       `yaml:"protocol-preference"`
@@ -242,6 +245,7 @@ func Load(yamlBytes []byte) (Config, error) {
 		},
 		Models:            models,
 		ProtocolEndpoints: protocolEndpoints(raw.ProtocolEndpoints),
+		QuotaPath:         quotaPath(raw.QuotaPath),
 		FallbackRoutes:    fallbackRoutes(raw.FallbackRoutes),
 		AllowHTTP:         raw.AllowHTTP,
 		RequestTimeout:    requestTimeout,
@@ -261,6 +265,21 @@ func Load(yamlBytes []byte) (Config, error) {
 		return Config{}, err
 	}
 	return c, nil
+}
+
+// DefaultQuotaPath is where the usage endpoint sits under base-url. It is not
+// a protocol endpoint, so it has its own setting.
+const DefaultQuotaPath = "/v1/usage"
+
+// quotaPath resolves the usage endpoint path.
+func quotaPath(raw *string) string {
+	if raw == nil {
+		return DefaultQuotaPath
+	}
+	if v := strings.TrimSpace(*raw); v != "" {
+		return v
+	}
+	return DefaultQuotaPath
 }
 
 // protocolEndpoints merges operator overrides onto the built-in paths.
@@ -439,6 +458,9 @@ func (c Config) validate() error {
 	}
 	if c.MaxResponseBytes <= 0 {
 		return fmt.Errorf("max-response-bytes: must be positive")
+	}
+	if c.QuotaPath != "" && !strings.HasPrefix(c.QuotaPath, "/") {
+		return fmt.Errorf("quota-path: must start with /")
 	}
 	for protocol, path := range c.ProtocolEndpoints {
 		if !validProtocols[protocol] {

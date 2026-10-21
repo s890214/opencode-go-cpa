@@ -235,6 +235,11 @@ func pluginConfigFields() []pluginapi.ConfigField {
 			Description: "Path of each protocol (`chat-completions: /v1/chat/completions`, ...). Change these when the upstream moves an endpoint; the plugin hardcodes nothing.",
 		},
 		{
+			Name:        "quota-path",
+			Type:        pluginapi.ConfigFieldTypeString,
+			Description: "Path of the usage endpoint relative to base-url (default: /v1/usage).",
+		},
+		{
 			Name:        "fallback-routes",
 			Type:        pluginapi.ConfigFieldTypeArray,
 			Description: "Family prefixes for models the `models` block does not list (`[{prefix: gpt, protocol: responses}, ...]`), first match wins. Empty means no guessing.",

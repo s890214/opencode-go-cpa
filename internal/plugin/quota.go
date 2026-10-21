@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"opencode-go-cpa/internal/config"
 	"strings"
 	"time"
 
@@ -28,7 +29,10 @@ func (m *Manager) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchReques
 		return empty, fmt.Errorf("quota credential has no API key")
 	}
 	m.mu.RLock()
-	baseURL, timeout := m.cfg.BaseURL, m.cfg.RequestTimeout
+	baseURL, quotaPath, timeout := m.cfg.BaseURL, m.cfg.QuotaPath, m.cfg.RequestTimeout
+	if quotaPath == "" {
+		quotaPath = config.DefaultQuotaPath
+	}
 	m.mu.RUnlock()
 	if m.bridge == nil {
 		return empty, fmt.Errorf("quota bridge unavailable")
@@ -38,7 +42,7 @@ func (m *Manager) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchReques
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	resp, err := m.bridge.Do(ctx, pluginapi.HTTPRequest{Method: http.MethodGet, URL: strings.TrimRight(baseURL, "/") + "/usage", Headers: http.Header{"Authorization": {"Bearer " + key}, "Accept": {"application/json"}}})
+	resp, err := m.bridge.Do(ctx, pluginapi.HTTPRequest{Method: http.MethodGet, URL: strings.TrimRight(baseURL, "/") + quotaPath, Headers: http.Header{"Authorization": {"Bearer " + key}, "Accept": {"application/json"}}})
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return empty, fmt.Errorf("quota upstream request failed")
 	}
