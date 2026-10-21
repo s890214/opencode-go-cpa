@@ -111,6 +111,7 @@ func captureResponsesItems(items []json.RawMessage) {
 type reasoningTee struct {
 	route  catalog.Route
 	active bool
+	framer *shared.SSEFramer
 	text   strings.Builder
 	calls  []string
 	seen   map[string]struct{}
@@ -126,12 +127,19 @@ func (t *reasoningTee) Feed(chunk []byte) {
 	if t == nil || !t.active || len(chunk) == 0 {
 		return
 	}
-	for _, line := range strings.Split(string(chunk), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "data:") {
-			continue
+	// The framer carries partial lines across chunks. Parsing each chunk on
+	// its own silently dropped every frame the network happened to split:
+	// measured, 64-byte chunks captured 0 of 103 characters from one stream.
+	if t.framer == nil {
+		t.framer = shared.NewSSEFramer(false)
+	}
+	t.framer.Push(chunk)
+	for {
+		_, data, _, ok := t.framer.Next()
+		if !ok {
+			return
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		payload := strings.TrimSpace(data)
 		if payload == "" || payload == "[DONE]" {
 			continue
 		}

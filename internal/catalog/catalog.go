@@ -61,20 +61,26 @@ func routeFromString(s string) (Route, bool) {
 
 // ModelRecord is one routable normalized catalog entry (arch §7, FR-003).
 type ModelRecord struct {
-	PublicID     string
-	UpstreamID   string
-	DisplayName  string
-	Protocol     Route
+	PublicID    string
+	UpstreamID  string
+	DisplayName string
+	Protocol    Route
 	// SupportedProtocols lists the upstream protocols this model accepts
-	// natively (from protocol-preference); the client's protocol wins when
-	// it appears here, otherwise Protocol is used as the translation target.
+	// natively, in priority order (first = default route).
 	SupportedProtocols []Route
-	EndpointPath string
-	ContextLimit int64
-	OutputLimit  int64
-	InputModes   []string
-	OutputModes  []string
-	Thinking     *pluginapi.ThinkingSupport
+	// ReasoningShape is the wire form this model expects when thinking is
+	// passed back on the Responses wire.
+	ReasoningShape config.ReasoningShape
+	// EndpointPaths maps every supported protocol to its resolved path, so a
+	// pass-through to any protocol lands on the configured endpoint instead
+	// of the protocol default.
+	EndpointPaths map[string]string
+	EndpointPath  string
+	ContextLimit  int64
+	OutputLimit   int64
+	InputModes    []string
+	OutputModes   []string
+	Thinking      *pluginapi.ThinkingSupport
 }
 
 // UnsupportedModel is a discovered model excluded from the routable set,
@@ -308,17 +314,18 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			display = e.ID
 		}
 		rec := ModelRecord{
-			PublicID:     config.PublicID(m.cfg, e.ID),
-			UpstreamID:   e.ID,
-			DisplayName:  display,
-			Protocol:     route,
+			PublicID:           config.PublicID(m.cfg, e.ID),
+			UpstreamID:         e.ID,
+			DisplayName:        display,
+			Protocol:           route,
 			SupportedProtocols: m.supportedProtocolsFor(e.ID),
-			EndpointPath: endpoint,
-			ContextLimit: e.ContextLength,
-			OutputLimit:  e.MaxOutputTokens,
-			InputModes:   inputModes,
-			OutputModes:  outputModes,
-			Thinking:     normalizeThinking(e.Thinking),
+			ReasoningShape:     m.reasoningShapeFor(e.ID),
+			EndpointPath:       endpoint,
+			ContextLimit:       e.ContextLength,
+			OutputLimit:        e.MaxOutputTokens,
+			InputModes:         inputModes,
+			OutputModes:        outputModes,
+			Thinking:           normalizeThinking(e.Thinking),
 		}
 		// With a prefix enabled, one record's PublicID can equal another
 		// record's UpstreamID (upstream "foo" and "opencode-go/foo" both
@@ -347,7 +354,7 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 	// An entry whose model id is absent from the upstream catalog does
 	// nothing at all — the client keeps getting the default route and
 	// loses Responses-only features with no other symptom. Name it.
-	for id := range m.cfg.ProtocolPreference {
+	for id := range m.cfg.Models {
 		matched := false
 		for seenID := range seen {
 			if seenID == id || strings.EqualFold(seenID, id) {
@@ -357,7 +364,7 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 		}
 		if !matched {
 			warns = append(warns, fmt.Sprintf(
-				"protocol-preference[%q]: model is not in the upstream catalog; entry has no effect", id))
+				"models[%q]: model is not in the upstream catalog; entry has no effect", id))
 		}
 	}
 	m.mu.Lock()
@@ -367,6 +374,49 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 
 // protocolEnabled reports whether the resolved route's protocol flag is on
 // (spec 04 §4); flags default to true.
+// endpointPathsFor resolves the path of every supported protocol: the
+// configured endpoint when the operator pinned one, the protocol default
+// otherwise.
+func (m *Manager) endpointPathsFor(upstreamID string) map[string]string {
+	mc, ok := m.modelConfig(upstreamID)
+	if !ok || len(mc.Protocols) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(mc.Protocols))
+	for _, name := range mc.Protocols {
+		route := Route(name)
+		if endpoint := mc.EndpointFor(name); endpoint != "" {
+			out[name] = endpoint
+		} else {
+			out[name] = route.EndpointPath()
+		}
+	}
+	return out
+}
+
+// builtinReasoningShapes covers the models whose shape is known to differ
+// from the default, so a config that never mentions reasoning-shape still
+// routes them correctly. Measured 2026-10-21: deepseek-v4-pro answers
+// `400 reasoning_text must be passed back` to summary[] and 200 to content[];
+// every other model tested (v4.1-flash, glm-5.3, glm-5.3-flash, kimi-k3)
+// answers 503 to content[] and 200 to summary[].
+var builtinReasoningShapes = map[string]config.ReasoningShape{
+	"deepseek-v4-pro": config.ShapeContent,
+}
+
+// reasoningShapeFor resolves the reasoning wire form: explicit config first
+// (so an operator can override the built-in table), then the built-in table,
+// then summary.
+func (m *Manager) reasoningShapeFor(upstreamID string) config.ReasoningShape {
+	if mc, ok := m.modelConfig(upstreamID); ok && mc.ReasoningShape != "" {
+		return mc.ReasoningShape
+	}
+	if shape, ok := builtinReasoningShapes[strings.ToLower(upstreamID)]; ok {
+		return shape
+	}
+	return config.ShapeSummary
+}
+
 func (m *Manager) protocolEnabled(r Route) bool {
 	switch r {
 	case RouteChatCompletions:
@@ -379,28 +429,32 @@ func (m *Manager) protocolEnabled(r Route) bool {
 	return true
 }
 
-// supportedProtocolsFor returns the configured pass-through protocols for a
-// model, de-duplicated. The default route stays in Protocol; this list only
-// enables the client's protocol when the upstream speaks it natively.
-// Lookup tolerates case differences against the configured id: the catalog
-// and the operator's config are maintained in different places, and a
-// silently inert entry looks exactly like a broken feature.
-func (m *Manager) supportedProtocolsFor(upstreamID string) []Route {
-	raw, ok := m.cfg.ProtocolPreference[upstreamID]
-	if !ok {
-		for name, protocols := range m.cfg.ProtocolPreference {
-			if strings.EqualFold(name, upstreamID) {
-				raw, ok = protocols, true
-				break
-			}
+// modelConfig resolves a model's policy, tolerating case differences against
+// the configured id: the catalog and the operator's config are maintained in
+// different places, and a silently inert entry looks exactly like a broken
+// feature.
+func (m *Manager) modelConfig(upstreamID string) (config.ModelConfig, bool) {
+	if mc, ok := m.cfg.Models[upstreamID]; ok {
+		return mc, true
+	}
+	for name, mc := range m.cfg.Models {
+		if strings.EqualFold(name, upstreamID) {
+			return mc, true
 		}
 	}
-	if !ok || len(raw) == 0 {
+	return config.ModelConfig{}, false
+}
+
+// supportedProtocolsFor returns the protocols this model speaks natively, in
+// the configured priority order (first = default route).
+func (m *Manager) supportedProtocolsFor(upstreamID string) []Route {
+	mc, ok := m.modelConfig(upstreamID)
+	if !ok || len(mc.Protocols) == 0 {
 		return nil
 	}
-	out := make([]Route, 0, len(raw))
-	seen := make(map[Route]struct{}, len(raw))
-	for _, name := range raw {
+	out := make([]Route, 0, len(mc.Protocols))
+	seen := make(map[Route]struct{}, len(mc.Protocols))
+	for _, name := range mc.Protocols {
 		route := Route(name)
 		if _, dup := seen[route]; dup {
 			continue
@@ -414,12 +468,18 @@ func (m *Manager) supportedProtocolsFor(upstreamID string) []Route {
 // resolve applies route priority strictly: user override, compatibility
 // table (family prefix), none (arch §5).
 func (m *Manager) resolve(e rawModel) (Route, string, bool, string) {
-	if o, ok := m.cfg.RouteOverrides[e.ID]; ok {
-		// Spec 04 §5: an override MUST be visible in diagnostics. Load
-		// validation (spec 04 §6) guarantees a known protocol, so the
-		// map lookup above is the only decision point here.
-		return Route(o.Protocol), o.Endpoint, true, fmt.Sprintf(
-			"model %q routed via user override (%s %s)", e.ID, o.Protocol, o.Endpoint)
+	// Configured models own their route outright: protocols[0] is the default
+	// and endpoints may pin a per-protocol path.
+	if mc, ok := m.modelConfig(e.ID); ok && len(mc.Protocols) > 0 {
+		def := Route(mc.DefaultProtocol())
+		endpoint := mc.EndpointFor(string(def))
+		// Only a non-default path is worth a diagnostic: pinning the protocol
+		// default is the normal case and would flood the warning list.
+		reason := ""
+		if endpoint != "" && endpoint != def.EndpointPath() {
+			reason = fmt.Sprintf("model %q routed by config (%s %s)", e.ID, def, endpoint)
+		}
+		return def, endpoint, true, reason
 	}
 	id := strings.ToLower(e.ID)
 	for _, p := range prefixRoutes {

@@ -87,21 +87,28 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 				rec.Protocol = sourceRoute
 				// The endpoint must follow the protocol actually used, or a
 				// Responses body gets posted to the Chat Completions path.
-				// A route override only keeps its custom endpoint when it
-				// pins the SAME protocol the client asked for; otherwise the
-				// override describes the default route and must not leak its
-				// path into this pass-through.
-				override, pinned := cfg.RouteOverrides[rec.UpstreamID]
-				if pinned && catalog.Route(override.Protocol) == sourceRoute && override.Endpoint != "" {
-					rec.EndpointPath = override.Endpoint
+				// EndpointPaths already resolved every supported protocol
+				// (configured path or protocol default), so this single
+				// lookup keeps a pinned endpoint and ignores paths that
+				// belong to other protocols.
+				if endpoint, ok := rec.EndpointPaths[string(sourceRoute)]; ok && endpoint != "" {
+					rec.EndpointPath = endpoint
 				} else {
 					rec.EndpointPath = sourceRoute.EndpointPath()
+				}
+				if m.bridge != nil {
+					_ = m.bridge.Log("debug", "pass-through selected", map[string]any{
+						"model": rec.UpstreamID, "source": req.SourceFormat,
+						"protocol": string(sourceRoute), "endpoint": rec.EndpointPath,
+					})
 				}
 				break
 			}
 		}
 	}
-	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *shared.NewResponseTools()}, nil
+	rt := shared.NewResponseTools()
+	rt.SetReasoningShape(string(rec.ReasoningShape))
+	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *rt}, nil
 }
 
 // routeForSourceFormat maps the inbound client protocol to an upstream route.
@@ -141,6 +148,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
+	m.logLosses(res)
 
 	url := catalog.JoinUpstreamURL(res.cfg.BaseURL, res.rec.EndpointPath)
 	debugTrace("executor resolved public_model=%s upstream_model=%s route=%s url=%s key_count=%d", req.Model, res.rec.UpstreamID, res.rec.Protocol, url, len(res.cfg.APIKeys))
@@ -412,6 +420,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
+	m.logLosses(res)
 
 	url := catalog.JoinUpstreamURL(res.cfg.BaseURL, res.rec.EndpointPath)
 	debugTrace("executor sending stream url=%s body_len=%d", url, len(upstreamBody))
@@ -545,4 +554,22 @@ func (m *Manager) emitAll(downStreamID string, events [][]byte) error {
 		}
 	}
 	return nil
+}
+
+// logLosses surfaces every tool the translator had to drop. A silently
+// discarded web_search looks to the model like a capability that does not
+// exist, which is impossible to diagnose from the client side.
+func (m *Manager) logLosses(res *resolvedExecution) {
+	if res == nil || m.bridge == nil {
+		return
+	}
+	losses := res.tools.Losses()
+	if len(losses) == 0 {
+		return
+	}
+	_ = m.bridge.Log("warn", "tools dropped during translation", map[string]any{
+		"route": string(res.rec.Protocol),
+		"model": res.rec.UpstreamID,
+		"tools": strings.Join(losses, "; "),
+	})
 }

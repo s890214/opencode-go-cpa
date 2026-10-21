@@ -63,18 +63,57 @@ type RouteOverride struct {
 	Endpoint string `yaml:"endpoint"`
 }
 
+// ReasoningShape selects the wire form used when a Responses request has to
+// carry thinking back to the upstream. The upstreams disagree: measured on
+// 2026-10-21, deepseek-v4-pro rejects the summary form with
+// `400 reasoning_text must be passed back` while deepseek-v4.1-flash rejects
+// the content form with `503 Endpoint is unavailable.`. An empty value means
+// summary, which every model measured so far except v4-pro accepts.
+type ReasoningShape string
+
+const (
+	ShapeSummary ReasoningShape = "summary"
+	ShapeContent ReasoningShape = "content"
+)
+
+// ModelConfig is one upstream model's policy: which protocols it speaks
+// natively (first entry = default route), the shape of the reasoning item it
+// expects back, and any per-protocol endpoint overrides.
+type ModelConfig struct {
+	Protocols      []string
+	ReasoningShape ReasoningShape
+	// Endpoints overrides the default path of a protocol. Keyed by protocol
+	// so one model can pin different custom paths for different protocols.
+	Endpoints map[string]string
+}
+
+// DefaultProtocol returns the model's default route ("" when unconfigured).
+func (m ModelConfig) DefaultProtocol() string {
+	if len(m.Protocols) == 0 {
+		return ""
+	}
+	return m.Protocols[0]
+}
+
+// EndpointFor returns the configured path for a protocol, or "" to use the
+// protocol default.
+func (m ModelConfig) EndpointFor(protocol string) string {
+	if m.Endpoints == nil {
+		return ""
+	}
+	return m.Endpoints[protocol]
+}
+
 type Config struct {
-	BaseURL          string
-	CatalogURL       string
-	ModelPrefix      ModelPrefix
-	APIKeys          []APIKey
-	Catalog          Catalog
-	Protocols        Protocols
-	RouteOverrides   map[string]RouteOverride
-	// ProtocolPreference lists upstream protocols a model can speak natively.
-	// When a client requests one of them, the request is passed through
-	// instead of translated to the model's default route.
-	ProtocolPreference map[string][]string
+	BaseURL     string
+	CatalogURL  string
+	ModelPrefix ModelPrefix
+	APIKeys     []APIKey
+	Catalog     Catalog
+	Protocols   Protocols
+	// Models carries the per-model policy merged from the `models` block and
+	// the legacy `protocol-preference` / `route-overrides` tables.
+	Models           map[string]ModelConfig
 	AllowHTTP        bool
 	RequestTimeout   time.Duration
 	MaxResponseBytes int64
@@ -84,17 +123,28 @@ type Config struct {
 // (apply default) from explicitly-set values including "" (validate as-is).
 // Unknown fields are ignored (host may pass extra keys).
 type rawConfig struct {
-	BaseURL          *string                  `yaml:"base-url"`
-	CatalogURL       *string                  `yaml:"catalog-url"`
-	ModelPrefix      rawPrefix                `yaml:"model-prefix"`
-	APIKeys          []rawKey                 `yaml:"api-keys"`
-	Catalog          rawCatalog               `yaml:"catalog"`
-	Protocols        rawProtocols             `yaml:"protocols"`
-	RouteOverrides   map[string]RouteOverride `yaml:"route-overrides"`
-	ProtocolPreference map[string][]string   `yaml:"protocol-preference"`
-	AllowHTTP        bool                     `yaml:"allow-http"`
-	RequestTimeout   *string                  `yaml:"request-timeout"`
-	MaxResponseBytes *int64                   `yaml:"max-response-bytes"`
+	BaseURL            *string                   `yaml:"base-url"`
+	CatalogURL         *string                   `yaml:"catalog-url"`
+	ModelPrefix        rawPrefix                 `yaml:"model-prefix"`
+	APIKeys            []rawKey                  `yaml:"api-keys"`
+	Catalog            rawCatalog                `yaml:"catalog"`
+	Protocols          rawProtocols              `yaml:"protocols"`
+	Models             map[string]rawModelConfig `yaml:"models"`
+	RouteOverrides     map[string]RouteOverride  `yaml:"route-overrides"`
+	ProtocolPreference map[string][]string       `yaml:"protocol-preference"`
+	AllowHTTP          bool                      `yaml:"allow-http"`
+	RequestTimeout     *string                   `yaml:"request-timeout"`
+	MaxResponseBytes   *int64                    `yaml:"max-response-bytes"`
+}
+
+// rawModelConfig mirrors one entry of the `models` block.
+type rawModelConfig struct {
+	Protocols      []string          `yaml:"protocols"`
+	ReasoningShape string            `yaml:"reasoning-shape"`
+	Endpoints      map[string]string `yaml:"endpoints"`
+	// Endpoint is the single-protocol shorthand; it lands under the model's
+	// default protocol. Kept so a one-protocol model stays a two-line entry.
+	Endpoint string `yaml:"endpoint"`
 }
 
 type rawPrefix struct {
@@ -149,23 +199,8 @@ func Load(yamlBytes []byte) (Config, error) {
 	if requestTimeout <= 0 {
 		return Config{}, fmt.Errorf("request-timeout: must be positive")
 	}
-	// Normalize protocol-preference keys and values once, so a stray space
-	// or "Responses" cannot turn a working entry into a silent no-op later.
-	preference := make(map[string][]string, len(raw.ProtocolPreference))
-	for name, protocols := range raw.ProtocolPreference {
-		key := strings.TrimSpace(name)
-		seenProtocol := make(map[string]struct{}, len(protocols))
-		list := make([]string, 0, len(protocols))
-		for _, protocol := range protocols {
-			value := strings.ToLower(strings.TrimSpace(protocol))
-			if _, dup := seenProtocol[value]; dup {
-				continue
-			}
-			seenProtocol[value] = struct{}{}
-			list = append(list, value)
-		}
-		preference[key] = list
-	}
+	// Fold the `models` block and the legacy tables into one policy map.
+	models := mergeModels(raw)
 	c := Config{
 		BaseURL: orDefault(raw.BaseURL, DefaultBaseURL),
 		ModelPrefix: ModelPrefix{
@@ -182,8 +217,7 @@ func Load(yamlBytes []byte) (Config, error) {
 			Messages:        orDefault(raw.Protocols.Messages, true),
 			Responses:       orDefault(raw.Protocols.Responses, true),
 		},
-		RouteOverrides:   raw.RouteOverrides,
-		ProtocolPreference: preference,
+		Models:           models,
 		AllowHTTP:        raw.AllowHTTP,
 		RequestTimeout:   requestTimeout,
 		MaxResponseBytes: orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
@@ -199,6 +233,114 @@ func Load(yamlBytes []byte) (Config, error) {
 		return Config{}, err
 	}
 	return c, nil
+}
+
+// mergeModels folds the `models` block and the two legacy tables into one
+// policy map. Precedence per field: `models` wins, then `route-overrides`
+// (whose protocol also becomes the default route), then
+// `protocol-preference` (which only lists capabilities).
+//
+// The legacy shape forced operators to maintain the same model twice, with a
+// single endpoint slot shared by every protocol it speaks — which is what made
+// a model like qwen3.7-max look inconsistent. Merging here keeps existing
+// configs working while the new block stays the single source of truth.
+func mergeModels(raw rawConfig) map[string]ModelConfig {
+	models := make(map[string]ModelConfig, len(raw.Models))
+
+	for id, entry := range raw.Models {
+		key := strings.TrimSpace(id)
+		mc := ModelConfig{}
+		seen := make(map[string]struct{}, len(entry.Protocols))
+		for _, p := range entry.Protocols {
+			v := normalizeProtocol(p)
+			if v == "" {
+				continue
+			}
+			if _, dup := seen[v]; dup {
+				continue
+			}
+			seen[v] = struct{}{}
+			mc.Protocols = append(mc.Protocols, v)
+		}
+		if shape := normalizeProtocol(entry.ReasoningShape); shape != "" {
+			mc.ReasoningShape = ReasoningShape(shape)
+		}
+		if len(entry.Endpoints) > 0 {
+			mc.Endpoints = make(map[string]string, len(entry.Endpoints))
+			for p, path := range entry.Endpoints {
+				if v := normalizeProtocol(p); v != "" && strings.TrimSpace(path) != "" {
+					mc.Endpoints[v] = strings.TrimSpace(path)
+				}
+			}
+		}
+		if path := strings.TrimSpace(entry.Endpoint); path != "" {
+			if mc.Endpoints == nil {
+				mc.Endpoints = map[string]string{}
+			}
+			if d := mc.DefaultProtocol(); d != "" {
+				if _, exists := mc.Endpoints[d]; !exists {
+					mc.Endpoints[d] = path
+				}
+			}
+		}
+		models[key] = mc
+	}
+
+	for id, protocols := range raw.ProtocolPreference {
+		key := strings.TrimSpace(id)
+		mc := models[key]
+		if len(mc.Protocols) == 0 {
+			seen := make(map[string]struct{}, len(protocols))
+			for _, p := range protocols {
+				v := normalizeProtocol(p)
+				if v == "" {
+					continue
+				}
+				if _, dup := seen[v]; dup {
+					continue
+				}
+				seen[v] = struct{}{}
+				mc.Protocols = append(mc.Protocols, v)
+			}
+		}
+		models[key] = mc
+	}
+
+	for id, override := range raw.RouteOverrides {
+		key := strings.TrimSpace(id)
+		mc := models[key]
+		protocol := normalizeProtocol(override.Protocol)
+		if protocol != "" {
+			mc.Protocols = promoteProtocol(mc.Protocols, protocol)
+		}
+		if path := strings.TrimSpace(override.Endpoint); path != "" && protocol != "" {
+			if mc.Endpoints == nil {
+				mc.Endpoints = map[string]string{}
+			}
+			mc.Endpoints[protocol] = path
+		}
+		models[key] = mc
+	}
+
+	return models
+}
+
+// promoteProtocol moves proto to the front, adding it when absent. An
+// explicit route override states the default route, so it must win over
+// whatever order protocol-preference happened to use.
+func promoteProtocol(protocols []string, proto string) []string {
+	out := make([]string, 0, len(protocols)+1)
+	out = append(out, proto)
+	for _, p := range protocols {
+		if p != proto {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func normalizeProtocol(p string) string {
+	return strings.ToLower(strings.TrimSpace(p))
 }
 
 // PublicID returns the client-facing model ID (FR-003).
@@ -237,25 +379,32 @@ func (c Config) validate() error {
 	if c.MaxResponseBytes <= 0 {
 		return fmt.Errorf("max-response-bytes: must be positive")
 	}
-	for name, protocols := range c.ProtocolPreference {
+	for name, protocols := range c.Models {
 		if strings.TrimSpace(name) == "" {
-			return fmt.Errorf("protocol-preference: model id must not be empty")
+			return fmt.Errorf("models: model id must not be empty")
 		}
-		for _, protocol := range protocols {
+		if len(protocols.Protocols) == 0 {
+			return fmt.Errorf("models[%s].protocols: at least one protocol is required", name)
+		}
+		for _, protocol := range protocols.Protocols {
 			if !validProtocols[protocol] {
-				return fmt.Errorf("protocol-preference[%s]: unsupported protocol %q", name, protocol)
+				return fmt.Errorf("models[%s].protocols: unsupported protocol %q", name, protocol)
 			}
 		}
-	}
-	for name, o := range c.RouteOverrides {
-		if !validProtocols[o.Protocol] {
-			return fmt.Errorf("route-overrides[%s].protocol: unsupported protocol %q", name, o.Protocol)
+		if protocols.ReasoningShape != "" {
+			switch protocols.ReasoningShape {
+			case ShapeSummary, ShapeContent:
+			default:
+				return fmt.Errorf("models[%s].reasoning-shape: unsupported value %q", name, protocols.ReasoningShape)
+			}
 		}
-		if o.Endpoint == "" {
-			return fmt.Errorf("route-overrides[%s].endpoint: must not be empty", name)
-		}
-		if !strings.HasPrefix(o.Endpoint, "/") {
-			return fmt.Errorf("route-overrides[%s].endpoint: must start with /", name)
+		for protocol, endpoint := range protocols.Endpoints {
+			if !validProtocols[protocol] {
+				return fmt.Errorf("models[%s].endpoints: unsupported protocol %q", name, protocol)
+			}
+			if !strings.HasPrefix(endpoint, "/") {
+				return fmt.Errorf("models[%s].endpoints[%s]: must start with /", name, protocol)
+			}
 		}
 	}
 	if c.ModelPrefix.Enabled && !validPrefix(c.ModelPrefix.Value) {

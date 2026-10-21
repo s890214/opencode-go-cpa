@@ -47,21 +47,38 @@ func TextFromResponseItem(raw json.RawMessage) string {
 // the check without inventing analysis the model did not do.
 const PlaceholderText = "Continuing after the tool result."
 
-// ResponseItem renders the reasoning item this upstream accepts. The
-// `summary` shape is mandatory: a `content[]` reasoning item makes the
-// OpenCode Go Responses endpoint answer 503 "Endpoint is unavailable.",
-// while `summary[]` with non-empty text is accepted. An unknown turn is
-// therefore filled with PlaceholderText rather than dropped — dropping it
-// is what produced the 400 in the first place.
-func ResponseItem(text string) json.RawMessage {
+// Shape values accepted by ResponseItem. They mirror
+// config.ReasoningShape without importing it.
+const (
+	ShapeSummary = "summary"
+	ShapeContent = "content"
+)
+
+// ResponseItem renders the reasoning item in the shape this upstream expects.
+//
+// Measured 2026-10-21: deepseek-v4-pro answers `400 reasoning_text must be
+// passed back` to the summary form and accepts content[]; deepseek-v4.1-flash
+// and glm-5.3-flash answer `503 Endpoint is unavailable.` to content[] and
+// accept summary[]. There is no single shape that works for both, so the shape
+// is per-model configuration rather than a guess.
+//
+// An empty text always becomes PlaceholderText: an empty summary is rejected
+// exactly like a missing item.
+func ResponseItem(text, shape string) json.RawMessage {
 	if strings.TrimSpace(text) == "" {
 		text = PlaceholderText
 	}
-	payload := map[string]any{
-		"type": "reasoning",
-		"summary": []map[string]any{
-			{"type": "summary_text", "text": text},
-		},
+	var payload map[string]any
+	if shape == ShapeContent {
+		payload = map[string]any{
+			"type":    "reasoning",
+			"content": []map[string]any{{"type": "reasoning_text", "text": text}},
+		}
+	} else {
+		payload = map[string]any{
+			"type":    "reasoning",
+			"summary": []map[string]any{{"type": "summary_text", "text": text}},
+		}
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

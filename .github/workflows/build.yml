@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 env:
-  PLUGIN_ID: opencode-go-cliproxyapi
+  PLUGIN_ID: opencode-go-cpa
 
 jobs:
   test:

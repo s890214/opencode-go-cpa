@@ -128,8 +128,15 @@ func buildOpenAIRequest(upstreamModel string, body []byte, tools *shared.Respons
 					if !hasCalls || len(rawCalls) == 0 || string(rawCalls) == "null" {
 						continue
 					}
-					if _, hasReasoning := m["reasoning_content"]; hasReasoning {
-						continue
+					if rawReasoning, hasReasoning := m["reasoning_content"]; hasReasoning {
+						// null is not the same as "": the upstream accepts
+						// an empty string but answers 400 for null, so a
+						// present-but-null field still needs the backfill.
+						switch trimmed := strings.TrimSpace(string(rawReasoning)); trimmed {
+						case "", "null":
+						default:
+							continue
+						}
 					}
 					encoded, err := json.Marshal(*toolCallReasoning(tools, firstToolCallID(rawCalls), "", false))
 					if err != nil {
@@ -186,8 +193,8 @@ type ccContentPart struct {
 }
 
 type ccMessage struct {
-	Role     string              `json:"role"`
-	Content  any                 `json:"content"` // string, []ccContentPart, or nil
+	Role      string              `json:"role"`
+	Content   any                 `json:"content"` // string, []ccContentPart, or nil
 	ToolCalls []shared.CCToolCall `json:"tool_calls,omitempty"`
 	// ReasoningContent replays the thinking that produced ToolCalls.
 	// Upstreams in thinking mode reject a tool turn without it, so the

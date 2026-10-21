@@ -408,4 +408,3 @@ func TestLiveClaudeToolReferenceToChatCompletions(t *testing.T) {
 		t.Fatalf("response missing content block: %s", string(respBody))
 	}
 }
-

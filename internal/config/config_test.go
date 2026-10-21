@@ -109,9 +109,9 @@ max-response-bytes: 1024
 	if c.Protocols.ChatCompletions || c.Protocols.Messages || c.Protocols.Responses {
 		t.Errorf("Protocols = %+v", c.Protocols)
 	}
-	o, ok := c.RouteOverrides["gpt-5.6-luna"]
-	if !ok || o.Protocol != "responses" || o.Endpoint != "/v1/responses" {
-		t.Errorf("RouteOverrides = %+v", c.RouteOverrides)
+	mc, ok := c.Models["gpt-5.6-luna"]
+	if !ok || mc.DefaultProtocol() != "responses" || mc.EndpointFor("responses") != "/v1/responses" {
+		t.Errorf("Models = %+v", c.Models)
 	}
 	if !c.AllowHTTP {
 		t.Errorf("AllowHTTP = false")
@@ -252,17 +252,12 @@ func TestLoadRejections(t *testing.T) {
 		{
 			"override unsupported protocol",
 			"route-overrides:\n  bad-model:\n    protocol: grpc\n    endpoint: /v1/x\n" + withKey,
-			"route-overrides[bad-model].protocol: unsupported protocol",
-		},
-		{
-			"override empty endpoint",
-			"route-overrides:\n  bad-model:\n    protocol: responses\n    endpoint: \"\"\n" + withKey,
-			"route-overrides[bad-model].endpoint: must not be empty",
+			"models[bad-model].protocols: unsupported protocol",
 		},
 		{
 			"override endpoint without leading slash",
 			"route-overrides:\n  bad-model:\n    protocol: responses\n    endpoint: v1/x\n" + withKey,
-			"route-overrides[bad-model].endpoint: must start with /",
+			"models[bad-model].endpoints[responses]: must start with /",
 		},
 		{"prefix enabled empty value", "model-prefix:\n  enabled: true\n  value: \"\"\n" + withKey, "model-prefix.value: invalid provider-ID characters"},
 		{"prefix with space", "model-prefix:\n  value: has space\n" + withKey, "model-prefix.value: invalid provider-ID characters"},
@@ -334,5 +329,25 @@ func TestValidateURLRejectsQueryFragmentUserinfo(t *testing.T) {
 				t.Errorf("error echoes credentials: %q", err.Error())
 			}
 		})
+	}
+}
+
+// An override without a path means "use the protocol default"; the merge folds
+// it into the model policy without pinning a path, so no error is raised.
+func TestEmptyOverrideEndpointUsesProtocolDefault(t *testing.T) {
+	c, err := Load([]byte(`route-overrides:
+  bad-model:
+    protocol: responses
+    endpoint: ""
+` + withKey))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	mc, ok := c.Models["bad-model"]
+	if !ok || mc.DefaultProtocol() != "responses" {
+		t.Fatalf("Models = %+v", c.Models)
+	}
+	if got := mc.EndpointFor("responses"); got != "" {
+		t.Fatalf("endpoint = %q, want empty (protocol default)", got)
 	}
 }

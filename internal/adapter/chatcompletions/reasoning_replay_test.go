@@ -116,3 +116,23 @@ func TestExistingReasoningContentPreserved(t *testing.T) {
 		t.Fatalf("reasoning_content = %v, want the client value", msg.ReasoningContent)
 	}
 }
+
+// The upstream answers 400 for reasoning_content:null but 200 for "", so a
+// present-but-null field must be treated as missing.
+func TestNullReasoningContentIsBackfilled(t *testing.T) {
+	shared.DefaultReasoningStore().Reset()
+	shared.DefaultReasoningStore().Put("c9", "real thinking")
+	body := []byte(`{"model":"x","messages":[
+		{"role":"user","content":"hi"},
+		{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"id":"c9","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"c9","content":"ok"}
+	]}`)
+	out, eErr := BuildRequest("deepseek-v4.1-flash", "openai", body, nil)
+	if eErr != nil {
+		t.Fatalf("BuildRequest err = %+v", eErr)
+	}
+	msg := assistantWithCalls(t, decodeMessages(t, out))
+	if msg.ReasoningContent == nil || *msg.ReasoningContent != "real thinking" {
+		t.Fatalf("reasoning_content = %v, want the cached text", msg.ReasoningContent)
+	}
+}

@@ -65,12 +65,12 @@ func TestStoreEvictsOldestBeyondMax(t *testing.T) {
 func TestResponseItemUsesSummaryForm(t *testing.T) {
 	// The upstream answers 503 for a content[]-shaped reasoning item, so
 	// the emitted shape is always summary[].
-	item := string(ResponseItem("why"))
+	item := string(ResponseItem("why", ShapeSummary))
 	if item != `{"summary":[{"text":"why","type":"summary_text"}],"type":"reasoning"}` &&
 		item != `{"type":"reasoning","summary":[{"text":"why","type":"summary_text"}]}` {
 		t.Fatalf("item = %s", item)
 	}
-	if got := TextFromResponseItem(ResponseItem("why")); got != "why" {
+	if got := TextFromResponseItem(ResponseItem("why", ShapeSummary)); got != "why" {
 		t.Fatalf("round trip = %q", got)
 	}
 }
@@ -78,10 +78,10 @@ func TestResponseItemUsesSummaryForm(t *testing.T) {
 // The upstream rejects an empty summary just like a missing item, so the
 // placeholder must carry text.
 func TestResponseItemEmptyBecomesPlaceholder(t *testing.T) {
-	if got := TextFromResponseItem(ResponseItem("")); got != PlaceholderText {
+	if got := TextFromResponseItem(ResponseItem("", ShapeSummary)); got != PlaceholderText {
 		t.Fatalf("placeholder text = %q, want %q", got, PlaceholderText)
 	}
-	if got := TextFromResponseItem(ResponseItem("   ")); got != PlaceholderText {
+	if got := TextFromResponseItem(ResponseItem("   ", ShapeSummary)); got != PlaceholderText {
 		t.Fatalf("blank text must also become the placeholder, got %q", got)
 	}
 }

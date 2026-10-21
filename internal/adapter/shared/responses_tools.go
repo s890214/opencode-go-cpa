@@ -31,11 +31,14 @@ type responseToolIdentity struct {
 }
 
 // ResponseTools tracks flattened namespace wire names to their original
-// identity so outbound function calls restore on the return path, and
-// carries the reasoning cache the request translators read back.
+// identity so outbound function calls restore on the return path, carries the
+// reasoning cache the request translators read back, and carries the reasoning
+// wire shape the target model expects.
 type ResponseTools struct {
 	names     map[string]responseToolIdentity
 	reasoning *reasoning.Store
+	shape     string
+	losses    []string
 }
 
 // NewResponseTools prepares an empty namespace registry bound to the
@@ -47,12 +50,47 @@ func NewResponseTools() *ResponseTools {
 	}
 }
 
+// AddLoss records a tool the translator had to drop. Every loss is surfaced by
+// the executor, because a silently discarded web_search looks to the model like
+// a capability that simply does not exist.
+func (t *ResponseTools) AddLoss(name, reason string) {
+	if t == nil {
+		return
+	}
+	t.losses = append(t.losses, name+" ("+reason+")")
+}
+
+// Losses returns the dropped tools, nil when nothing was lost.
+func (t *ResponseTools) Losses() []string {
+	if t == nil {
+		return nil
+	}
+	return t.losses
+}
+
 // Reasoning returns the cache backing this conversion, never nil.
 func (t *ResponseTools) Reasoning() *reasoning.Store {
 	if t == nil || t.reasoning == nil {
 		return defaultReasoningStore
 	}
 	return t.reasoning
+}
+
+// SetReasoningShape records the wire form the target model expects
+// (reasoning.ShapeSummary or reasoning.ShapeContent).
+func (t *ResponseTools) SetReasoningShape(shape string) {
+	if t == nil {
+		return
+	}
+	t.shape = shape
+}
+
+// ReasoningShape returns the configured wire form, defaulting to summary.
+func (t *ResponseTools) ReasoningShape() string {
+	if t == nil || t.shape == "" {
+		return reasoning.ShapeSummary
+	}
+	return t.shape
 }
 
 // ResponseToolContext resolves the registry for a request conversion:
@@ -134,20 +172,23 @@ func qualifiedToolName(name, namespace string) string {
 // (web_search, web_search_preview) with no function-calling equivalent. It
 // rewrites generic custom tools to functions with a default empty-object
 // parameters schema. It reports false when the tool must be dropped.
-func normalizeCustomTool(tool *RespTool, target string) bool {
+func normalizeCustomTool(tool *RespTool, target string, owner *ResponseTools) bool {
 	if tool.Type == "custom" && tool.Name == "apply_patch" {
 		// Native Responses upstreams accept custom tools (verified: the
 		// OpenCode Go responses endpoint returns custom_tool_call). Only
 		// translated routes need to drop apply_patch, like web_search.
 		if target != "/v1/responses" {
+			owner.AddLoss(tool.Name, "custom tool has no "+target+" equivalent")
 			return false
 		}
 	}
 	if tool.Type == "tool_search" || tool.Type == "image_generation" {
+		owner.AddLoss(tool.Name, "server-side tool has no "+target+" equivalent")
 		return false
 	}
 	if (target == "/v1/chat/completions" || target == "/v1/messages") &&
 		(tool.Type == "web_search" || tool.Type == "web_search_preview") {
+		owner.AddLoss(tool.Name, "hosted search has no "+target+" equivalent")
 		return false
 	}
 	if tool.Type == "custom" {
@@ -187,7 +228,7 @@ func (t *ResponseTools) Normalize(r *ResponsesRequest, target string) ([]RespIte
 	for _, tool := range r.Tools {
 		if tool.Type != "namespace" {
 			wasCustom := tool.Type == "custom"
-			if !normalizeCustomTool(&tool, target) {
+			if !normalizeCustomTool(&tool, target, t) {
 				continue
 			}
 			if wasCustom {
@@ -203,7 +244,7 @@ func (t *ResponseTools) Normalize(r *ResponsesRequest, target string) ([]RespIte
 		}
 		for _, child := range tool.Tools {
 			wasCustom := child.Type == "custom"
-			if !normalizeCustomTool(&child, target) {
+			if !normalizeCustomTool(&child, target, t) {
 				continue
 			}
 			if eErr := FunctionTool(child.Type, target); eErr != nil {

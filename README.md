@@ -102,25 +102,41 @@ plugins:
         refresh-interval: "15m"          # discovery refresh cadence, min "1m" (default: "15m")
         stale-while-unavailable: true    # retain last good catalog snapshot on refresh failure (default: true)
 
-      # Per-model protocol preference: list the protocols the upstream
-      # natively supports. If the client's protocol is listed, the request is
-      # passed through unmodified (no translation); otherwise it falls back to
-      # the model's default route.
-      protocol-preference:
-        deepseek-v4.1-flash: ["chat-completions", "responses", "messages"]
-        claude-haiku-5-5: ["messages"]
+      # Per-model policy. One entry per model:
+      #   protocols        protocols the upstream speaks natively, in priority
+      #                    order — the first one is the default route. A client
+      #                    whose protocol appears here is passed through with
+      #                    no translation at all.
+      #   reasoning-shape  "summary" (default) or "content". Upstreams disagree
+      #                    and answer 400/503 for the wrong one; measured:
+      #                    deepseek-v4-pro wants content, deepseek-v4.1-flash
+      #                    and glm want summary.
+      #   endpoints        optional per-protocol path override. Only needed
+      #                    when a protocol lives somewhere other than its
+      #                    default path.
+      models:
+        deepseek-v4.1-flash:
+          protocols: ["chat-completions", "responses", "messages"]
+        deepseek-v4-pro:
+          protocols: ["chat-completions", "responses", "messages"]
+          reasoning-shape: "content"
+        claude-haiku-5-5:
+          protocols: ["messages"]
+        "custom-proxy-model":
+          protocols: ["chat-completions", "responses"]
+          endpoints:
+            responses: "/v1/responses"     # must start with /
+
+      # Legacy shortcut: a single-protocol model can be written as
+      #   some-model: { protocols: [messages], endpoint: "/v1/messages" }
+      # The old `protocol-preference` and `route-overrides` tables still load
+      # and are merged into `models`, so existing configs keep working.
 
       # Protocol enable/disable switches (all default to true)
       protocols:
         chat-completions: true   # enables models routed to /v1/chat/completions
         messages: true           # enables models routed to /v1/messages
         responses: true          # enables models routed to /v1/responses
-
-      # Explicit route overrides per model (takes priority over built-in prefix routing)
-      route-overrides:
-        "custom-model":
-          protocol: "messages"           # "chat-completions" | "messages" | "responses"
-          endpoint: "/v1/messages"       # must start with /
 
       # Execution settings
       request-timeout: "5m"              # upstream request timeout (default: "5m")
@@ -142,7 +158,11 @@ plugins:
 | `protocols.chat-completions` | `bool` | `true` | Protocol switch for Chat Completions endpoints. |
 | `protocols.messages` | `bool` | `true` | Protocol switch for Messages endpoints. |
 | `protocols.responses` | `bool` | `true` | Protocol switch for Responses endpoints. |
-| `route-overrides` | `map` | `{}` | Map of model ID to `{ protocol: "...", endpoint: "..." }` overriding built-in family routing. Valid protocols: `chat-completions`, `messages`, `responses`. |
+| `models` | `map` | `{}` | Per-model policy: `protocols` (ordered, first = default route), `reasoning-shape` (`summary` \| `content`), `endpoints` (per-protocol path override). A model listed here owns its route outright. |
+| `models.<id>.reasoning-shape` | `string` | `summary` | Wire form of the reasoning item on the Responses route. `deepseek-v4-pro` needs `content`; every other measured model needs `summary` (or answers 503 for `content`). |
+| `models.<id>.endpoints` | `map` | `{}` | Optional path override per protocol; only needed when a protocol is not served at its default path. |
+| `protocol-preference` | `map` | `{}` | Legacy: protocols a model speaks natively. Merged into `models`. |
+| `route-overrides` | `map` | `{}` | Legacy: `{ protocol, endpoint }` per model, where `protocol` also becomes the default route. Merged into `models`. |
 | `request-timeout` | `duration` | `5m` | Upstream HTTP request timeout. Must be positive. |
 | `max-response-bytes` | `int64` | `67108864` (64 MiB) | Maximum non-streaming response body size in bytes. |
 | `allow-http` | `bool` | `false` | When `true`, permits `http://` scheme in `base-url` / `catalog-url` for local testing. |

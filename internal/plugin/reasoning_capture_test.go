@@ -92,3 +92,28 @@ func TestReasoningTeeFlushIsIdempotent(t *testing.T) {
 		t.Fatalf("late chunk leaked into the bind: %q", v)
 	}
 }
+
+// The tee must survive any chunk boundary the network hands it. The old
+// per-chunk line split captured nothing below ~1 KB per chunk.
+func TestReasoningTeeHandlesSplitChunks(t *testing.T) {
+	stream := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hello \"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"world\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_split\"}]}}]}\n\n"
+
+	for _, size := range []int{1, 3, 7, 64, 4096, len(stream)} {
+		shared.DefaultReasoningStore().Reset()
+		tee := newReasoningTee(catalog.RouteChatCompletions)
+		for i := 0; i < len(stream); i += size {
+			end := i + size
+			if end > len(stream) {
+				end = len(stream)
+			}
+			tee.Feed([]byte(stream[i:end]))
+		}
+		tee.Flush()
+		v, ok := shared.DefaultReasoningStore().Get("call_split")
+		if !ok || v != "hello world" {
+			t.Fatalf("chunk size %d: got (%q, %v), want (hello world, true)", size, v, ok)
+		}
+	}
+}

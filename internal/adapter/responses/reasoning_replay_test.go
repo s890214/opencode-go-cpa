@@ -152,3 +152,79 @@ func TestChatToolCallsGetReasoningItem(t *testing.T) {
 		t.Fatalf("reasoning must precede the call, got %v", items[want+1])
 	}
 }
+
+// deepseek-v4-pro rejects the summary shape (400) and accepts content[],
+// while deepseek-v4.1-flash does the exact opposite (503). The shape is a
+// per-model policy, so the emitted item must follow it.
+func TestReasoningShapeFollowsModelPolicy(t *testing.T) {
+	shared.DefaultReasoningStore().Reset()
+	body := []byte(`{"input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+		{"type":"function_call","call_id":"c1","name":"lookup","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c1","output":"ok"}
+	]}`)
+
+	rt := shared.NewResponseTools()
+	rt.SetReasoningShape("content")
+	out, eErr := BuildRequest("deepseek-v4-pro", "openai-response", body, nil, rt)
+	if eErr != nil {
+		t.Fatalf("BuildRequest err = %+v", eErr)
+	}
+	rs := itemMap(t, inputItems(t, decodeReq(t, out)), 1)
+	if rs["type"] != "reasoning" {
+		t.Fatalf("item1 = %v", rs)
+	}
+	if _, hasContent := rs["content"]; !hasContent {
+		t.Fatalf("content shape missing for v4-pro: %v", rs)
+	}
+	if _, hasSummary := rs["summary"]; hasSummary {
+		t.Fatalf("summary shape must not be used for v4-pro: %v", rs)
+	}
+}
+
+// A multi-turn history must not let the first turn's reasoning leak into the
+// second turn's call. The precomputed arrays make this structural, but the
+// behaviour is worth pinning down.
+func TestSecondTurnDoesNotInheritFirstTurnReasoning(t *testing.T) {
+	shared.DefaultReasoningStore().Reset()
+	shared.DefaultReasoningStore().Put("fc2", "CORRECT reasoning for fc2")
+	body := []byte(`{"input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"turn one"}]},
+		{"type":"reasoning","summary":[{"type":"summary_text","text":"TURN ONE reasoning"}]},
+		{"type":"function_call","call_id":"fc1","name":"lookup","arguments":"{}"},
+		{"type":"function_call_output","call_id":"fc1","output":"ok"},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"turn two"}]},
+		{"type":"function_call","call_id":"fc2","name":"lookup","arguments":"{}"},
+		{"type":"function_call_output","call_id":"fc2","output":"ok"}
+	]}`)
+	out, eErr := BuildRequest("deepseek-v4.1-flash", "openai-response", body, nil)
+	if eErr != nil {
+		t.Fatalf("BuildRequest err = %+v", eErr)
+	}
+	items := inputItems(t, decodeReq(t, out))
+	var texts []string
+	for _, item := range items {
+		im, ok := item.(map[string]any)
+		if !ok || im["type"] != "reasoning" {
+			continue
+		}
+		if parts, ok := im["summary"].([]any); ok {
+			for _, p := range parts {
+				if pm, ok := p.(map[string]any); ok {
+					texts = append(texts, pm["text"].(string))
+				}
+			}
+		}
+	}
+	if len(texts) < 2 {
+		t.Fatalf("want at least two reasoning items, got %v", texts)
+	}
+	for _, text := range texts[1:] {
+		if text == "TURN ONE reasoning" {
+			t.Fatalf("second turn inherited the first turn's reasoning: %v", texts)
+		}
+	}
+	if texts[len(texts)-1] != "CORRECT reasoning for fc2" {
+		t.Fatalf("second call did not use the cached text: %v", texts)
+	}
+}

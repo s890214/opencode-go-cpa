@@ -53,23 +53,20 @@ func BuildRequest(upstreamModel string, sourceFormat string, sourceBody []byte, 
 }
 
 // reasoningForCall renders the reasoning item that must precede a
-// function_call: the text carried by the inbound request wins, then the
-// captured copy for that call id, and finally an empty placeholder. The
-// upstream rejects a tool turn without a reasoning item in thinking mode
-// (400) and rejects a content[]-shaped one outright (503), so the item is
-// always emitted in the summary form.
-func reasoningForCall(tools []*shared.ResponseTools, callID, pending string, hasPending bool) json.RawMessage {
+// function_call. Precedence: the text carried by the inbound request (which
+// the caller passes as hint), then the captured upstream copy for that call
+// id, then a neutral placeholder. The shape comes from the target model: the
+// upstream answers 400 for a summary on a model that wants content, and 503
+// for the reverse.
+func reasoningForCall(tools []*shared.ResponseTools, callID, hint string) json.RawMessage {
 	store := shared.ResponseToolContext(tools)
-	text := ""
-	switch {
-	case hasPending:
-		text = pending
-	case len(callID) > 0:
+	text := strings.TrimSpace(hint)
+	if text == "" && len(callID) > 0 {
 		if v, ok := store.Reasoning().Get(callID); ok {
 			text = v
 		}
 	}
-	return reasoning.ResponseItem(text)
+	return reasoning.ResponseItem(text, store.ReasoningShape())
 }
 
 // rawCallID reads the call_id out of a decoded Responses item map.
@@ -107,35 +104,66 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 	// unmodeled fields (web_search_call action/status, reasoning
 	// summary/encrypted_content) survive byte-for-byte.
 	preserved := make([]json.RawMessage, 0)
+	// additional_tools items carry tool definitions that belong in the tools
+	// array; they are collected raw so nothing is lost on the way.
+	var extraTools []json.RawMessage
 	inputTouched := false
-	// Thinking-mode bookkeeping: a function_call replayed without a
-	// preceding reasoning item makes the upstream answer 400, while a
-	// content[]-shaped reasoning item makes it answer 503, so items are
-	// tracked here and re-emitted in the summary form.
-	var pendingReasoning string
-	var hasPendingReasoning bool
+	// Thinking-mode bookkeeping is precomputed rather than carried in a
+	// mutable cursor. The previous design kept the last reasoning text in a
+	// variable that only a few branches reset, so in a multi-turn history the
+	// second tool call could inherit the first turn's text. Two arrays make
+	// that impossible:
+	//   reasoningText[i]        inbound reasoning that applies at position i,
+	//                           cleared at every user turn so it cannot cross
+	//                           a conversation boundary
+	//   reasoningBeforeCall[i]  whether a tool call follows position i, i.e.
+	//                           whether its reasoning is worth keeping
 	lastWasReasoning := false
 	if inputRaw, ok := raw["input"]; ok && len(inputRaw) > 0 && string(inputRaw) != "null" {
 		var items []json.RawMessage
 		if err := json.Unmarshal(inputRaw, &items); err == nil {
 			inputTouched = true
-			// A reasoning item is only worth keeping when a tool call
-			// follows it: that is the one case the upstream insists on.
-			// An orphan reasoning item (history summary, encrypted blob
-			// nobody can read) is still dropped, as before.
+			reasoningText := make([]string, len(items))
 			reasoningBeforeCall := make([]bool, len(items))
+
+			current := ""
+			for i, item := range items {
+				var meta struct {
+					Type string `json:"type"`
+					Role string `json:"role"`
+				}
+				_ = json.Unmarshal(item, &meta)
+				switch meta.Type {
+				case "reasoning":
+					current = reasoning.TextFromResponseItem(item)
+				case "message":
+					if meta.Role == "user" {
+						current = ""
+					}
+				}
+				reasoningText[i] = current
+			}
+
+			// A reasoning item is only worth keeping when a tool call follows
+			// it: that is the one case the upstream insists on. An orphan
+			// reasoning item is still dropped, as before.
+			carry := false
 			for i := len(items) - 1; i >= 0; i-- {
 				var meta struct {
 					Type string `json:"type"`
+					Role string `json:"role"`
 				}
 				_ = json.Unmarshal(items[i], &meta)
 				switch meta.Type {
-				case "reasoning":
-					if i+1 < len(items) {
-						reasoningBeforeCall[i] = reasoningBeforeCall[i+1]
-					}
 				case "function_call", "custom_tool_call":
+					carry = true
 					reasoningBeforeCall[i] = true
+				case "message":
+					if meta.Role == "user" {
+						carry = false
+					}
+				case "reasoning":
+					reasoningBeforeCall[i] = carry
 				}
 			}
 			for idx, item := range items {
@@ -146,7 +174,7 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 				switch meta.Type {
 				case "additional_tools":
 					var at struct {
-						Tools []shared.RespTool `json:"tools"`
+						Tools []json.RawMessage `json:"tools"`
 					}
 					if err := json.Unmarshal(item, &at); err != nil {
 						return nil, errclass.Translation("additional_tools requires a tools array")
@@ -154,14 +182,15 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 					if at.Tools == nil {
 						return nil, errclass.Translation("additional_tools requires a tools array")
 					}
-					src.Tools = append(src.Tools, at.Tools...)
+					// Kept raw so a custom tool's grammar survives the merge.
+					extraTools = append(extraTools, at.Tools...)
 				case "custom_tool_call":
 					var m map[string]json.RawMessage
 					if err := json.Unmarshal(item, &m); err != nil {
 						return nil, errclass.Translation("invalid Responses request body: malformed JSON")
 					}
 					if !lastWasReasoning {
-						preserved = append(preserved, reasoningForCall(tools, rawCallID(m), pendingReasoning, hasPendingReasoning))
+						preserved = append(preserved, reasoningForCall(tools, rawCallID(m), reasoningText[idx]))
 						lastWasReasoning = true
 					}
 					typeBytes, _ := json.Marshal("function_call")
@@ -206,19 +235,21 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 						// upstream neither needs nor can decrypt it.
 						continue
 					}
-					pendingReasoning = reasoning.TextFromResponseItem(item)
-					hasPendingReasoning = true
 					// Replay the client's own item verbatim when it carries
-					// summary text. Codex sends summary[] plus an
-					// encrypted_content blob and the upstream accepts that
-					// shape as-is; rebuilding it would only discard fields.
-					// The upstream reads summary text and ignores
-					// encrypted_content, so an item with an empty summary
-					// still needs the text placeholder to satisfy it.
-					if strings.TrimSpace(pendingReasoning) == "" {
-						preserved = append(preserved, reasoning.ResponseItem(pendingReasoning))
-					} else {
+					// text, because Codex sends summary[] together with an
+					// opaque encrypted_content blob and the upstream accepts
+					// that exact shape. Rebuilding it would discard fields.
+					// Rebuilding is still needed in three cases: the item's
+					// text is empty (the upstream reads text only and ignores
+					// encrypted_content), the item uses the shape this model
+					// rejects, or the captured upstream text is available.
+					shape := shared.ResponseToolContext(tools).ReasoningShape()
+					text := reasoningText[idx]
+					keepVerbatim := strings.TrimSpace(text) != "" && reasoningShapeOf(item) == shape
+					if keepVerbatim {
 						preserved = append(preserved, item)
+					} else {
+						preserved = append(preserved, reasoning.ResponseItem(text, shape))
 					}
 					lastWasReasoning = true
 				case "function_call":
@@ -227,7 +258,7 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 						return nil, errclass.Translation("invalid Responses request body: malformed JSON")
 					}
 					if !lastWasReasoning {
-						preserved = append(preserved, reasoningForCall(tools, rawCallID(m), pendingReasoning, hasPendingReasoning))
+						preserved = append(preserved, reasoningForCall(tools, rawCallID(m), reasoningText[idx]))
 						lastWasReasoning = true
 					}
 					var args string
@@ -257,27 +288,47 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 		}
 	}
 
-	rt := shared.ResponseToolContext(tools)
-	toolReq := &shared.ResponsesRequest{Tools: src.Tools, ToolChoice: src.ToolChoice}
-	if _, eErr := rt.Normalize(toolReq, EndpointPath); eErr != nil {
-		return nil, eErr
-	}
-	src.Tools = toolReq.Tools
-	src.ToolChoice = toolReq.ToolChoice
-
 	modelBytes, _ := json.Marshal(upstreamModel)
 	raw["model"] = modelBytes
 
-	toolsClean := make([]any, len(src.Tools))
-	for i, t := range src.Tools {
-		if t.Type == "web_search" {
-			toolsClean[i] = map[string]any{"type": "web_search"}
-		} else {
-			toolsClean[i] = t
+	// Native pass-through, so the tools array is forwarded as-is. Normalize is
+	// a translation-layer step (Chat upstreams have no namespace concept) and
+	// running it here flattened Codex's four namespace trees — 45 MCP tools —
+	// into anonymous `ns__name` functions and degraded custom tools to plain
+	// functions, dropping their grammar. The upstream accepts both shapes
+	// verbatim (measured 200 / custom_tool_call), so nothing needs rewriting.
+	//
+	// The one exception is web_search: its search_content_types field is an
+	// OpenAI-only knob the upstream rejects, so that entry is reduced to
+	// {"type":"web_search"}.
+	if rawTools, ok := raw["tools"]; ok && len(rawTools) > 0 {
+		var entries []json.RawMessage
+		if err := json.Unmarshal(rawTools, &entries); err == nil {
+			changed := false
+			for i, entry := range entries {
+				var meta struct {
+					Type string `json:"type"`
+				}
+				_ = json.Unmarshal(entry, &meta)
+				if meta.Type != "web_search" {
+					continue
+				}
+				if trimmed, _ := json.Marshal(map[string]string{"type": "web_search"}); string(trimmed) != string(entry) {
+					entries[i] = trimmed
+					changed = true
+				}
+			}
+			for _, extra := range extraTools {
+				entries = append(entries, extra)
+				changed = true
+			}
+			if changed {
+				if b, err := json.Marshal(entries); err == nil {
+					raw["tools"] = b
+				}
+			}
 		}
 	}
-	toolsBytes, _ := json.Marshal(toolsClean)
-	raw["tools"] = toolsBytes
 
 	if inputTouched {
 		inputBytes, _ := json.Marshal(preserved)
@@ -459,7 +510,7 @@ func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.Thinki
 			if len(m.ToolCalls) > 0 {
 				// Thinking mode demands the reasoning that produced the
 				// calls; one item covers the whole parallel batch.
-				req.Input = append(req.Input, reasoningForCall(tools, m.ToolCalls[0].ID, "", false))
+				req.Input = append(req.Input, reasoningForCall(tools, m.ToolCalls[0].ID, ""))
 			}
 			for _, tc := range m.ToolCalls {
 				req.Input = append(req.Input, map[string]any{
@@ -626,7 +677,7 @@ func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.Thinkin
 					// Thinking mode demands the reasoning that produced
 					// the call; the block above (if present) is the
 					// original text, otherwise the cache fills it in.
-					req.Input = append(req.Input, reasoningForCall(tools, blk.CallID, thinkText, thinkText != ""))
+					req.Input = append(req.Input, reasoningForCall(tools, blk.CallID, thinkText))
 					reasoningEmitted = true
 				}
 				req.Input = append(req.Input, map[string]any{
@@ -673,4 +724,15 @@ func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.Thinkin
 	}
 	b, _ := json.Marshal(req) // only marshallable composed types; cannot fail
 	return b, nil
+}
+
+// reasoningShapeOf reports which wire shape an inbound reasoning item uses.
+func reasoningShapeOf(item json.RawMessage) string {
+	var probe struct {
+		Content []json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(item, &probe) == nil && len(probe.Content) > 0 {
+		return reasoning.ShapeContent
+	}
+	return reasoning.ShapeSummary
 }

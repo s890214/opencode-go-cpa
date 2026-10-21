@@ -127,11 +127,11 @@ func TestBuildRequest_ResponsesToResponses_NonGPTNormalized(t *testing.T) {
 	if !ok {
 		t.Fatalf("exec tool missing: %v", tools)
 	}
-	if exec["type"] != "function" {
-		t.Errorf("exec type = %v, want function", exec["type"])
-	}
-	if exec["parameters"] == nil {
-		t.Errorf("exec parameters missing: %v", exec)
+	// Pass-through forwards the client's tool array as-is: the upstream
+	// accepts a custom tool verbatim and answers with custom_tool_call.
+	// Rewriting it into a function would drop its grammar.
+	if exec["type"] != "custom" {
+		t.Errorf("exec type = %v, want custom (pass-through keeps the client shape)", exec["type"])
 	}
 	if _, ok := byName["extra"]; !ok {
 		t.Errorf("additional_tools not merged into tools: %v", tools)

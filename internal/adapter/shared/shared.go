@@ -532,7 +532,6 @@ func RespOutputText(raw json.RawMessage, targetNoun string) (string, *errclass.E
 	return b.String(), nil
 }
 
-
 // ClaudeImageURL converts an Anthropic image block source into an image
 // URL for OpenAI-style targets, encoding base64 sources as data URLs
 // (FR-005 multimodal preservation). Strict validation shared by every
@@ -1171,7 +1170,7 @@ type RespItem struct {
 	Summary   []struct {
 		Text string `json:"text"`
 	} `json:"summary,omitempty"`
-	Tools     []RespTool      `json:"tools,omitempty"`
+	Tools []RespTool `json:"tools,omitempty"`
 }
 
 // CCFunction is one Chat Completions tool function definition (decode and
@@ -1399,13 +1398,13 @@ type claudeWireMessage struct {
 
 // claudeWireBlock mirrors the inbound Anthropic block shape (decode-only).
 type claudeWireBlock struct {
-	Type   string `json:"type"`
-	Text   string `json:"text"`
+	Type string `json:"type"`
+	Text string `json:"text"`
 	// Thinking carries a thinking block's payload (Anthropic puts it in
 	// "thinking", not "text"); it is folded into ClaudeBlock.Text so
 	// adapters that must replay it do not need a second decoder.
 	Thinking string `json:"thinking"`
-	Source *struct {
+	Source   *struct {
 		Type      string `json:"type"` // base64 | url
 		MediaType string `json:"media_type"`
 		Data      string `json:"data"`

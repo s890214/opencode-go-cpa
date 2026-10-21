@@ -1,3 +1,90 @@
+## v0.5.0 — one config table, pass-through that really passes through
+
+### Per-model policy replaces two overlapping tables
+
+`protocol-preference` and `route-overrides` described the same model twice, and
+`route-overrides` could only hold one endpoint while the model spoke three
+protocols. Both are now folded into one block:
+
+```yaml
+models:
+  deepseek-v4.1-flash:
+    protocols: [chat-completions, responses, messages]   # first = default route
+  deepseek-v4-pro:
+    protocols: [chat-completions, responses, messages]
+    reasoning-shape: content
+  custom-proxy-model:
+    protocols: [chat-completions, responses]
+    endpoints:
+      responses: /v1/responses
+```
+
+- `protocols` is ordered: the first entry is the default route, and any client
+  whose protocol appears in the list is passed through untouched.
+- `endpoints` is keyed by protocol, so one model can pin a different custom path
+  for each protocol it serves.
+- `reasoning-shape` is `summary` (default) or `content`.
+- The legacy tables still load and are merged into `models`, so existing
+  configurations keep working.
+
+### Reasoning shape is per model, not guessed
+
+Measured on the OpenCode Go gateway:
+
+| model | `summary[]` | `content[]` |
+|---|---|---|
+| `deepseek-v4-pro` | **400** `reasoning_text must be passed back` | **200** |
+| `deepseek-v4.1-flash` | 200 | **503** `Endpoint is unavailable.` |
+| `glm-5.3-flash` / `kimi-k3` | 200 | **503** / **400** |
+
+There is no shape that works for all of them, so it is configuration:
+`reasoning-shape: content` for v4-pro, `summary` for everything else.
+
+### Pass-through no longer rewrites tools
+
+The translator's tool normalization used to run on the native Responses route
+too, which flattened Codex's four namespace trees (45 MCP tools, 34 of them
+under `mcp__codex_app`) into anonymous `ns__name` functions and degraded custom
+tools to plain functions, dropping their grammar. The upstream accepts both
+shapes verbatim — measured 200 with a namespace tree and `custom_tool_call` for
+a custom tool — so pass-through now forwards the tools array as-is, sanitising
+only `web_search` (its `search_content_types` field is OpenAI-only).
+
+### Reasoning binding is stateless
+
+`pendingReasoning` / `hasPendingReasoning` are gone. In a multi-turn history the
+second tool call could inherit the first turn's reasoning text, because only a
+few branches reset the cursor. Two precomputed arrays replace it:
+
+- `reasoningText[i]` — the inbound reasoning that applies at position i, cleared
+  at every user turn so it cannot cross a conversation boundary.
+- `reasoningBeforeCall[i]` — whether a tool call follows, i.e. whether that
+  reasoning is worth keeping.
+
+`reasoning_content: null` is now treated as missing (the upstream answers 400
+for `null` and 200 for `""`).
+
+### Streamed capture survives any chunk boundary
+
+`reasoningTee` parsed each network chunk on its own, so every SSE frame the
+network happened to split was dropped; at 64-byte chunks it captured 0 of 103
+characters. It now uses the shared `SSEFramer`, with a test that feeds the same
+stream in 1/3/7/64/4096-byte slices.
+
+### Dropped tools are logged
+
+A translated request that loses `web_search` or `apply_patch` now records a
+`warn` line naming what was lost and why. Pass-through selection is logged at
+`debug` level.
+
+### Release
+
+- CI artifact name fixed: `PLUGIN_ID` was still `opencode-go-cliproxyapi`, so the
+  zip never matched the deployment directory.
+- `gofmt` clean.
+
+---
+
 ## v0.4.0
 
 ### Thinking-mode pass-back (fixes the first tool-result turn)
@@ -21,42 +108,27 @@ discarding the item made every tool turn look reasoning-free.
 - Capture the upstream thinking keyed by tool call id, on both streaming and
   non-streaming responses, for Chat Completions and Responses routes.
 - Replay it on the next turn: `reasoning_content` for Chat Completions
-  targets, a `{"type":"reasoning","summary":[...]}` item for Responses
-  targets.
+  targets, a `reasoning` item for Responses targets.
 - Emit a neutral placeholder when nothing was captured. The upstream treats
-  an empty summary exactly like a missing item (`400`), so the field cannot be
-  left blank; the placeholder is a short factual sentence, not invented
-  analysis.
-- Never use the `content[]` shape for a reasoning item: the upstream answers
-  `503 Endpoint is unavailable.` for it. The `summary[]` shape is accepted.
-- Orphaned reasoning items (no trailing tool call) are still dropped, as
-  before; only the ones a tool call depends on are kept and replayed.
-- Anthropic `thinking` blocks ahead of `tool_use` are now decoded and replayed
-  instead of being discarded.
+  an empty summary exactly like a missing item (`400`).
+- Orphaned reasoning items (no trailing tool call) are still dropped.
+- Anthropic `thinking` blocks ahead of `tool_use` are decoded and replayed.
 
 ### Other fixes
 
-- `protocol-preference` is now published in the registration metadata, so the
-  management UI can list it. It was previously config-file only.
-- A `protocol-preference` entry whose model is not in the upstream catalog now
-  logs a warning. Before, a typo or an upstream rename silently disabled
-  pass-through with no diagnostic at all.
-- Model ids and protocol names in `protocol-preference` are trimmed, lowercased
-  and de-duplicated at load time, and matched case-insensitively against the
-  catalog.
-- Pass-through no longer rewrites `EndpointPath` for a model that has an
-  explicit `route-overrides` endpoint.
-- The `protocols.*` switches now gate pass-through as well, matching the
-  catalog build.
+- `protocol-preference` is published in the registration metadata.
+- A `protocol-preference` entry whose model is not in the upstream catalog logs
+  a warning.
+- Model ids and protocol names are normalised at load time and matched
+  case-insensitively against the catalog.
+- The `protocols.*` switches gate pass-through as well.
 - Default `base-url` is `https://opencode.ai/inference/go/v1`.
 
 ### Upgrade notes
 
 - Replace the plugin binary and restart CLIProxyAPI.
-- No config change is required: existing `protocol-preference` and
-  `route-overrides` blocks keep working.
+- No config change is required; the legacy tables keep working.
 - The reasoning cache is in-process, bounded (512 entries, 2 h TTL) and cleared
-  on restart. A conversation that spans a restart replays an empty placeholder
-  instead of a real summary — the request still succeeds.
+  on restart.
 
 **Full Changelog**: https://github.com/s890214/opencode-go-cpa/commits/main

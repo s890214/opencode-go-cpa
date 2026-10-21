@@ -113,8 +113,8 @@ func TestRefreshSuccess(t *testing.T) {
 		{"id":"minimax-m3"}
 	]}`
 	cfg := testCfg()
-	cfg.RouteOverrides = map[string]config.RouteOverride{
-		"gpt-5.6-luna": {Protocol: "responses", Endpoint: "/v1/responses"},
+	cfg.Models = map[string]config.ModelConfig{
+		"gpt-5.6-luna": {Protocols: []string{"responses"}, Endpoints: map[string]string{"responses": "/v1/responses"}},
 	}
 	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}}
 	m := newManager(cfg, fc)
@@ -142,17 +142,18 @@ func TestRefreshSuccess(t *testing.T) {
 		t.Errorf("minimax wrong: %+v", mm)
 	}
 
-	if len(m.Unsupported()) != 0 || len(m.Warnings()) != 1 ||
-		!strings.Contains(m.Warnings()[0], `model "gpt-5.6-luna" routed via user override`) {
+	// Pinning a protocol's default path is the normal case and stays silent;
+	// only a non-default endpoint earns a diagnostic.
+	if len(m.Unsupported()) != 0 || len(m.Warnings()) != 0 {
 		t.Errorf("unexpected diagnostics: %v %v", m.Unsupported(), m.Warnings())
 	}
 }
 
 func TestRoutePriorityMatrix(t *testing.T) {
 	cfg := testCfg()
-	cfg.RouteOverrides = map[string]config.RouteOverride{
-		"totally-new-x": {Protocol: "messages", Endpoint: "/v1/messages-override"},
-		"grok-4.5":      {Protocol: "chat-completions", Endpoint: "/v1/chat/completions"},
+	cfg.Models = map[string]config.ModelConfig{
+		"totally-new-x": {Protocols: []string{"messages"}, Endpoints: map[string]string{"messages": "/v1/messages-override"}},
+		"grok-4.5":      {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1/chat/completions"}},
 	}
 	body := `{"data":[
 		{"id":"glm-5.2"},
@@ -720,8 +721,8 @@ func TestProtocolEnabledUnknownRouteDefaultsTrue(t *testing.T) {
 // user route override MUST be visible in diagnostics.
 func TestOverrideApplicationRecordedInWarnings(t *testing.T) {
 	cfg := testCfg()
-	cfg.RouteOverrides = map[string]config.RouteOverride{
-		"weird-model": {Protocol: "chat-completions", Endpoint: "/v1/custom"},
+	cfg.Models = map[string]config.ModelConfig{
+		"weird-model": {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1/custom"}},
 	}
 	fc := &fakeClient{resp: pluginapi.HTTPResponse{
 		StatusCode: 200,
@@ -731,7 +732,7 @@ func TestOverrideApplicationRecordedInWarnings(t *testing.T) {
 	mustRefresh(t, m)
 
 	warns := m.Warnings()
-	if len(warns) != 1 || !strings.Contains(warns[0], `model "weird-model" routed via user override`) ||
+	if len(warns) != 1 || !strings.Contains(warns[0], `model "weird-model" routed by config`) ||
 		!strings.Contains(warns[0], "chat-completions /v1/custom") {
 		t.Fatalf("override warning wrong: %+v", warns)
 	}
@@ -797,9 +798,9 @@ func TestEndpointEscapeExcludedFromRoutableSet(t *testing.T) {
 	t.Run("bare-host base rejects authority rewrite", func(t *testing.T) {
 		cfg := testCfg()
 		cfg.BaseURL = "https://opencode.ai"
-		cfg.RouteOverrides = map[string]config.RouteOverride{
-			"evil":      {Protocol: "chat-completions", Endpoint: "/v1@evil.com/x"},
-			"custom-ok": {Protocol: "responses", Endpoint: "/v1/custom"},
+		cfg.Models = map[string]config.ModelConfig{
+			"evil":      {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1@evil.com/x"}},
+			"custom-ok": {Protocols: []string{"responses"}, Endpoints: map[string]string{"responses": "/v1/custom"}},
 		}
 		fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[
 			{"id":"evil"},
@@ -835,8 +836,8 @@ func TestEndpointEscapeExcludedFromRoutableSet(t *testing.T) {
 	t.Run("path-hosted base keeps same-host @ endpoint routable", func(t *testing.T) {
 		cfg := testCfg()
 		cfg.BaseURL = "https://opencode.ai/zen/go/v1"
-		cfg.RouteOverrides = map[string]config.RouteOverride{
-			"glm-5.2": {Protocol: "chat-completions", Endpoint: "/v1@evil.com/x"},
+		cfg.Models = map[string]config.ModelConfig{
+			"glm-5.2": {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1@evil.com/x"}},
 		}
 		fc := &fakeClient{resp: pluginapi.HTTPResponse{
 			StatusCode: 200,
@@ -853,8 +854,8 @@ func TestEndpointEscapeExcludedFromRoutableSet(t *testing.T) {
 	t.Run("override endpoints flow through the same check", func(t *testing.T) {
 		cfg := testCfg()
 		cfg.BaseURL = "https://opencode.ai"
-		cfg.RouteOverrides = map[string]config.RouteOverride{
-			"mystery-model": {Protocol: "chat-completions", Endpoint: "/v1@evil.com/y"},
+		cfg.Models = map[string]config.ModelConfig{
+			"mystery-model": {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1@evil.com/y"}},
 		}
 		fc := &fakeClient{resp: pluginapi.HTTPResponse{
 			StatusCode: 200,
@@ -912,8 +913,8 @@ func TestSeedFromRevalidatesEndpointsAgainstNewBase(t *testing.T) {
 	oldCfg := testCfg()
 	oldCfg.BaseURL = "https://api.test/v1"
 	oldCfg.CatalogURL = "https://api.test/v1/models"
-	oldCfg.RouteOverrides = map[string]config.RouteOverride{
-		"totally-new-x": {Protocol: "chat-completions", Endpoint: "/v1@evil.com/x"},
+	oldCfg.Models = map[string]config.ModelConfig{
+		"totally-new-x": {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1@evil.com/x"}},
 	}
 	prev := newManager(oldCfg, &fakeClient{resp: pluginapi.HTTPResponse{
 		StatusCode: 200,
@@ -925,8 +926,8 @@ func TestSeedFromRevalidatesEndpointsAgainstNewBase(t *testing.T) {
 	cfg := testCfg()
 	cfg.BaseURL = "https://opencode.ai"
 	cfg.CatalogURL = "https://opencode.ai/go/v1/models"
-	cfg.RouteOverrides = map[string]config.RouteOverride{
-		"totally-new-x": {Protocol: "chat-completions", Endpoint: "/v1@evil.com/x"},
+	cfg.Models = map[string]config.ModelConfig{
+		"totally-new-x": {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1@evil.com/x"}},
 	}
 	m := newManager(cfg, &fakeClient{})
 	m.SeedFrom(prev)
@@ -1041,9 +1042,9 @@ func TestSwapPublicUpstreamCrossKeyCollision(t *testing.T) {
 			body := fmt.Sprintf(`{"data":[{"id":%q},{"id":%q}]}`, ids[0], ids[1])
 			fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}}
 			cfg := testCfg()
-			cfg.RouteOverrides = map[string]config.RouteOverride{
-				ids[0]: {Protocol: "chat-completions", Endpoint: "/v1/chat/completions"},
-				ids[1]: {Protocol: "messages", Endpoint: "/v1/messages"},
+			cfg.Models = map[string]config.ModelConfig{
+				ids[0]: {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1/chat/completions"}},
+				ids[1]: {Protocols: []string{"messages"}, Endpoints: map[string]string{"messages": "/v1/messages"}},
 			}
 			m := newManager(cfg, fc)
 			mustRefresh(t, m)

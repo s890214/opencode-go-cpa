@@ -268,4 +268,3 @@ func TestLiveResponsesMultipartToolOutput(t *testing.T) {
 		t.Fatalf("expected HTTP 200, got %d: %s", resp.StatusCode, string(body))
 	}
 }
-
