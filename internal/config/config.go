@@ -15,7 +15,7 @@ import (
 
 // Defaults (spec 04 §2/§4).
 const (
-	DefaultBaseURL          = "https://opencode.ai/zen/go/v1"
+	DefaultBaseURL          = "https://opencode.ai/inference/go/v1"
 	DefaultModelPrefix      = "opencode-go"
 	DefaultRefreshInterval  = 15 * time.Minute
 	DefaultRequestTimeout   = 5 * time.Minute
@@ -41,6 +41,21 @@ type Protocols struct {
 	ChatCompletions bool
 	Messages        bool
 	Responses       bool
+}
+
+// Enabled reports whether one protocol switch is on. Pass-through honours
+// the same switches the catalog build does, so a disabled protocol cannot
+// sneak back in through protocol-preference.
+func (p Protocols) Enabled(protocol string) bool {
+	switch protocol {
+	case "chat-completions":
+		return p.ChatCompletions
+	case "messages":
+		return p.Messages
+	case "responses":
+		return p.Responses
+	}
+	return false
 }
 
 type RouteOverride struct {
@@ -134,6 +149,23 @@ func Load(yamlBytes []byte) (Config, error) {
 	if requestTimeout <= 0 {
 		return Config{}, fmt.Errorf("request-timeout: must be positive")
 	}
+	// Normalize protocol-preference keys and values once, so a stray space
+	// or "Responses" cannot turn a working entry into a silent no-op later.
+	preference := make(map[string][]string, len(raw.ProtocolPreference))
+	for name, protocols := range raw.ProtocolPreference {
+		key := strings.TrimSpace(name)
+		seenProtocol := make(map[string]struct{}, len(protocols))
+		list := make([]string, 0, len(protocols))
+		for _, protocol := range protocols {
+			value := strings.ToLower(strings.TrimSpace(protocol))
+			if _, dup := seenProtocol[value]; dup {
+				continue
+			}
+			seenProtocol[value] = struct{}{}
+			list = append(list, value)
+		}
+		preference[key] = list
+	}
 	c := Config{
 		BaseURL: orDefault(raw.BaseURL, DefaultBaseURL),
 		ModelPrefix: ModelPrefix{
@@ -151,7 +183,7 @@ func Load(yamlBytes []byte) (Config, error) {
 			Responses:       orDefault(raw.Protocols.Responses, true),
 		},
 		RouteOverrides:   raw.RouteOverrides,
-		ProtocolPreference: raw.ProtocolPreference,
+		ProtocolPreference: preference,
 		AllowHTTP:        raw.AllowHTTP,
 		RequestTimeout:   requestTimeout,
 		MaxResponseBytes: orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),

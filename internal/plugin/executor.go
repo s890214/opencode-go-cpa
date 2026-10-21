@@ -79,13 +79,24 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 	// protocol natively (protocol-preference), send it there instead of
 	// translating to the model's default route. This keeps Responses-only
 	// features (web_search, custom tools) intact for Responses clients.
-	if sourceRoute, ok := routeForSourceFormat(req.SourceFormat); ok {
+	// The protocol switches gate this path exactly like the catalog build,
+	// so a disabled protocol cannot re-enter through a preference entry.
+	if sourceRoute, ok := routeForSourceFormat(req.SourceFormat); ok && cfg.Protocols.Enabled(string(sourceRoute)) {
 		for _, supported := range rec.SupportedProtocols {
 			if supported == sourceRoute {
 				rec.Protocol = sourceRoute
-				// The endpoint must follow the chosen protocol; otherwise a
-				// Responses body would be sent to the default chat path.
-				rec.EndpointPath = sourceRoute.EndpointPath()
+				// The endpoint must follow the protocol actually used, or a
+				// Responses body gets posted to the Chat Completions path.
+				// A route override only keeps its custom endpoint when it
+				// pins the SAME protocol the client asked for; otherwise the
+				// override describes the default route and must not leak its
+				// path into this pass-through.
+				override, pinned := cfg.RouteOverrides[rec.UpstreamID]
+				if pinned && catalog.Route(override.Protocol) == sourceRoute && override.Endpoint != "" {
+					rec.EndpointPath = override.Endpoint
+				} else {
+					rec.EndpointPath = sourceRoute.EndpointPath()
+				}
 				break
 			}
 		}
@@ -154,6 +165,10 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	if int64(len(resp.Body)) > res.cfg.MaxResponseBytes {
 		return classEnvelope(errclass.Translation("response exceeds max-response-bytes")), nil
 	}
+	// Record the thinking behind any tool calls before translation, so a
+	// later turn can replay it: Responses clients never see it otherwise,
+	// and thinking mode rejects the tool result turn without it.
+	captureNonStreamReasoning(res.rec.Protocol, resp.Body)
 	converted, eErr := convertNonStream(res.rec.Protocol, req.SourceFormat, resp.StatusCode, resp.Body, &res.tools)
 	if eErr != nil {
 		return classEnvelope(eErr), nil
@@ -461,6 +476,10 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 	defer watchdog.Stop()
 
 	conv := newStreamConverter(res.rec.Protocol, sourceFormat, &res.tools)
+	// Mirror capture for streaming: the same chunks that feed the client
+	// converter also feed the reasoning tee, which binds on stream end.
+	tee := newReasoningTee(res.rec.Protocol)
+	defer tee.Flush()
 	var (
 		total          int64
 		upstreamClosed bool
@@ -483,6 +502,7 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 			return
 		}
 		total += int64(len(payload))
+		tee.Feed(payload)
 		if total > res.cfg.MaxResponseBytes {
 			closeStreams(errclass.Redact("stream exceeded max-response-bytes"))
 			return

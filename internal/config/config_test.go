@@ -25,10 +25,10 @@ func TestLoadMinimalAppliesAllDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(minimal) failed: %v", err)
 	}
-	if c.BaseURL != "https://opencode.ai/zen/go/v1" {
+	if c.BaseURL != "https://opencode.ai/inference/go/v1" {
 		t.Errorf("BaseURL = %q", c.BaseURL)
 	}
-	if c.CatalogURL != "https://opencode.ai/zen/go/v1/models" {
+	if c.CatalogURL != "https://opencode.ai/inference/go/v1/models" {
 		t.Errorf("CatalogURL = %q", c.CatalogURL)
 	}
 	if !c.ModelPrefix.Enabled || c.ModelPrefix.Value != "opencode-go" {
@@ -154,11 +154,11 @@ func TestLoadDerivedCatalogURLFromCustomBase(t *testing.T) {
 }
 
 func TestLoadDerivedCatalogURLTrimsTrailingSlash(t *testing.T) {
-	c, err := Load([]byte("base-url: https://opencode.ai/zen/go/v1/\n" + withKey))
+	c, err := Load([]byte("base-url: https://opencode.ai/inference/go/v1/\n" + withKey))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if c.CatalogURL != "https://opencode.ai/zen/go/v1/models" {
+	if c.CatalogURL != "https://opencode.ai/inference/go/v1/models" {
 		t.Errorf("CatalogURL = %q, want no double slash", c.CatalogURL)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"opencode-go-cpa/internal/adapter/shared"
 	"opencode-go-cpa/internal/catalog"
 	"opencode-go-cpa/internal/errclass"
+	"opencode-go-cpa/internal/reasoning"
 	"opencode-go-cpa/internal/thinking"
 )
 
@@ -43,12 +44,43 @@ func BuildRequest(upstreamModel string, sourceFormat string, sourceBody []byte, 
 		}
 		return shared.RewriteModelID(upstreamModel, sourceBody, "openai-response")
 	case "openai":
-		return fromChatCompletions(upstreamModel, sourceBody, ts)
+		return fromChatCompletions(upstreamModel, sourceBody, ts, tools...)
 	case "claude":
-		return fromClaudeMessages(upstreamModel, sourceBody, ts)
+		return fromClaudeMessages(upstreamModel, sourceBody, ts, tools...)
 	default:
 		return nil, shared.UnsupportedFormat(sourceFormat, EndpointPath)
 	}
+}
+
+// reasoningForCall renders the reasoning item that must precede a
+// function_call: the text carried by the inbound request wins, then the
+// captured copy for that call id, and finally an empty placeholder. The
+// upstream rejects a tool turn without a reasoning item in thinking mode
+// (400) and rejects a content[]-shaped one outright (503), so the item is
+// always emitted in the summary form.
+func reasoningForCall(tools []*shared.ResponseTools, callID, pending string, hasPending bool) json.RawMessage {
+	store := shared.ResponseToolContext(tools)
+	text := ""
+	switch {
+	case hasPending:
+		text = pending
+	case len(callID) > 0:
+		if v, ok := store.Reasoning().Get(callID); ok {
+			text = v
+		}
+	}
+	return reasoning.ResponseItem(text)
+}
+
+// rawCallID reads the call_id out of a decoded Responses item map.
+func rawCallID(m map[string]json.RawMessage) string {
+	raw, ok := m["call_id"]
+	if !ok || len(raw) == 0 {
+		return ""
+	}
+	var id string
+	_ = json.Unmarshal(raw, &id)
+	return id
 }
 
 // fromResponsesNormalized normalizes a native Responses passthrough body
@@ -76,11 +108,37 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 	// summary/encrypted_content) survive byte-for-byte.
 	preserved := make([]json.RawMessage, 0)
 	inputTouched := false
+	// Thinking-mode bookkeeping: a function_call replayed without a
+	// preceding reasoning item makes the upstream answer 400, while a
+	// content[]-shaped reasoning item makes it answer 503, so items are
+	// tracked here and re-emitted in the summary form.
+	var pendingReasoning string
+	var hasPendingReasoning bool
+	lastWasReasoning := false
 	if inputRaw, ok := raw["input"]; ok && len(inputRaw) > 0 && string(inputRaw) != "null" {
 		var items []json.RawMessage
 		if err := json.Unmarshal(inputRaw, &items); err == nil {
 			inputTouched = true
-			for _, item := range items {
+			// A reasoning item is only worth keeping when a tool call
+			// follows it: that is the one case the upstream insists on.
+			// An orphan reasoning item (history summary, encrypted blob
+			// nobody can read) is still dropped, as before.
+			reasoningBeforeCall := make([]bool, len(items))
+			for i := len(items) - 1; i >= 0; i-- {
+				var meta struct {
+					Type string `json:"type"`
+				}
+				_ = json.Unmarshal(items[i], &meta)
+				switch meta.Type {
+				case "reasoning":
+					if i+1 < len(items) {
+						reasoningBeforeCall[i] = reasoningBeforeCall[i+1]
+					}
+				case "function_call", "custom_tool_call":
+					reasoningBeforeCall[i] = true
+				}
+			}
+			for idx, item := range items {
 				var meta struct {
 					Type string `json:"type"`
 				}
@@ -101,6 +159,10 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 					var m map[string]json.RawMessage
 					if err := json.Unmarshal(item, &m); err != nil {
 						return nil, errclass.Translation("invalid Responses request body: malformed JSON")
+					}
+					if !lastWasReasoning {
+						preserved = append(preserved, reasoningForCall(tools, rawCallID(m), pendingReasoning, hasPendingReasoning))
+						lastWasReasoning = true
 					}
 					typeBytes, _ := json.Marshal("function_call")
 					m["type"] = typeBytes
@@ -135,12 +197,27 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 						return nil, errclass.Translation("failed to encode normalized Responses request: " + err.Error())
 					}
 					preserved = append(preserved, b)
-				case "compaction", "reasoning":
-					// Dropped: non-GPT upstreams reject historical reasoning and compaction blobs.
+					lastWasReasoning = false
+				case "compaction":
+					// Dropped: non-GPT upstreams reject compaction blobs.
+				case "reasoning":
+					if !reasoningBeforeCall[idx] {
+						// Orphan reasoning (no trailing tool call): the
+						// upstream neither needs nor can decrypt it.
+						continue
+					}
+					pendingReasoning = reasoning.TextFromResponseItem(item)
+					hasPendingReasoning = true
+					preserved = append(preserved, reasoning.ResponseItem(pendingReasoning))
+					lastWasReasoning = true
 				case "function_call":
 					var m map[string]json.RawMessage
 					if err := json.Unmarshal(item, &m); err != nil {
 						return nil, errclass.Translation("invalid Responses request body: malformed JSON")
+					}
+					if !lastWasReasoning {
+						preserved = append(preserved, reasoningForCall(tools, rawCallID(m), pendingReasoning, hasPendingReasoning))
+						lastWasReasoning = true
 					}
 					var args string
 					if rawArgs, ok := m["arguments"]; ok {
@@ -153,8 +230,12 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 						return nil, errclass.Translation("failed to encode normalized Responses request: " + err.Error())
 					}
 					preserved = append(preserved, b)
+					// Parallel calls share the single reasoning item that
+					// precedes them; a following output item ends the turn.
+					lastWasReasoning = true
 				default:
 					preserved = append(preserved, item)
+					lastWasReasoning = false
 				}
 			}
 		} else {
@@ -297,7 +378,7 @@ func contentParts(raw json.RawMessage, role string) ([]map[string]any, *errclass
 // equivalent (logprobs, frequency_penalty, presence_penalty, n, seed,
 // response_format, logit_bias) via struct selection. Tool calls and
 // reasoning controls are never dropped silently.
-func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport) ([]byte, *errclass.Error) {
+func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
 	var src shared.ChatCompletionsRequest
 	if err := json.Unmarshal(body, &src); err != nil {
 		return nil, errclass.Translation("malformed openai request JSON: " + err.Error())
@@ -363,6 +444,11 @@ func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.Thinki
 			}
 			if len(parts) > 0 {
 				req.Input = append(req.Input, msgItem(m.Role, parts))
+			}
+			if len(m.ToolCalls) > 0 {
+				// Thinking mode demands the reasoning that produced the
+				// calls; one item covers the whole parallel batch.
+				req.Input = append(req.Input, reasoningForCall(tools, m.ToolCalls[0].ID, "", false))
 			}
 			for _, tc := range m.ToolCalls {
 				req.Input = append(req.Input, map[string]any{
@@ -453,7 +539,7 @@ func reasoningEffortFor(effort string, ts *pluginapi.ThinkingSupport) (string, b
 // silently lost (FR-005). The tool_result is_error flag has no Responses
 // field and is preserved as an "[error] " marker in the output text rather
 // than lost silently.
-func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport) ([]byte, *errclass.Error) {
+func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
 	src, eErr := shared.DecodeClaudeMessages(body)
 	if eErr != nil {
 		return nil, eErr
@@ -514,6 +600,8 @@ func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.Thinkin
 		if m.Content != "" {
 			parts = append(parts, textPart(m.Role, m.Content))
 		}
+		var thinkText string
+		reasoningEmitted := false
 		for _, blk := range m.Blocks {
 			switch blk.Kind {
 			case "text":
@@ -523,6 +611,13 @@ func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.Thinkin
 			case "tool_use":
 				flush()
 				args := shared.DefaultArgs(string(blk.Input))
+				if !reasoningEmitted {
+					// Thinking mode demands the reasoning that produced
+					// the call; the block above (if present) is the
+					// original text, otherwise the cache fills it in.
+					req.Input = append(req.Input, reasoningForCall(tools, blk.CallID, thinkText, thinkText != ""))
+					reasoningEmitted = true
+				}
 				req.Input = append(req.Input, map[string]any{
 					"type":      "function_call",
 					"call_id":   blk.CallID,
@@ -543,8 +638,11 @@ func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.Thinkin
 					"call_id": blk.CallID,
 					"output":  output,
 				})
-			case "thinking", "redacted_thinking":
-				// omitted per the FR-005 policy in the doc comment
+				reasoningEmitted = false
+			case "thinking":
+				thinkText = blk.Text
+			case "redacted_thinking":
+				// omitted: encrypted metadata with no readable equivalent
 			default:
 				flush()
 				return nil, shared.UnsupportedPartType(blk.Kind, EndpointPath)

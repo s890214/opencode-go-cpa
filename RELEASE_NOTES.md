@@ -1,18 +1,60 @@
-## What's Changed
+## v0.4.0
 
-### Bug Fixes
+### Thinking-mode pass-back (fixes the first tool-result turn)
 
-- Preserve Claude image tool results when routing to Chat Completions: retain images in an associated user message after tool replies, preserve text, tool references and error markers, and include images in session derivation. The selected upstream model must support image input.
+OpenCode Go runs tool-calling turns in thinking mode. When the assistant turn
+that produced a tool call is replayed without its reasoning, the upstream
+answers:
 
-Special thanks to @c0mm4nd in #16.
+```
+400 invalid_request_error: The `reasoning_content` in the thinking mode
+must be passed back to the API.
+```
 
-- Fix `tool_result` translation when receiving `tool_reference` content blocks from Claude clients (such as ToolSearch, web search, or web fetch in Claude Code), preventing 500 errors and conversation lockouts on Chat Completions and Responses models like DeepSeek.
+Codex speaks the Responses protocol and only replays the call item plus its
+output; the upstream Responses endpoint never hands it the reasoning
+(`reasoning_tokens` is 0), so every conversation broke on the first tool
+result.
 
-Special thanks to @SpiGAndromeda in #14.
+- Capture the upstream thinking keyed by tool call id, on both streaming and
+  non-streaming responses, for Chat Completions and Responses routes.
+- Replay it on the next turn: `reasoning_content` for Chat Completions
+  targets, a `{"type":"reasoning","summary":[...]}` item for Responses
+  targets.
+- Emit a neutral placeholder when nothing was captured. The upstream treats
+  an empty summary exactly like a missing item (`400`), so the field cannot be
+  left blank; the placeholder is a short factual sentence, not invented
+  analysis.
+- Never use the `content[]` shape for a reasoning item: the upstream answers
+  `503 Endpoint is unavailable.` for it. The `summary[]` shape is accepted.
+- Orphaned reasoning items (no trailing tool call) are still dropped, as
+  before; only the ones a tool call depends on are kept and replayed.
+- Anthropic `thinking` blocks ahead of `tool_use` are now decoded and replayed
+  instead of being discarded.
 
-## Upgrade Notes
+### Other fixes
 
-- Replace the old plugin binary with the new release binary.
-- Restart CLIProxyAPI after replacing the plugin.
+- `protocol-preference` is now published in the registration metadata, so the
+  management UI can list it. It was previously config-file only.
+- A `protocol-preference` entry whose model is not in the upstream catalog now
+  logs a warning. Before, a typo or an upstream rename silently disabled
+  pass-through with no diagnostic at all.
+- Model ids and protocol names in `protocol-preference` are trimmed, lowercased
+  and de-duplicated at load time, and matched case-insensitively against the
+  catalog.
+- Pass-through no longer rewrites `EndpointPath` for a model that has an
+  explicit `route-overrides` endpoint.
+- The `protocols.*` switches now gate pass-through as well, matching the
+  catalog build.
+- Default `base-url` is `https://opencode.ai/inference/go/v1`.
 
-**Full Changelog**: https://github.com/massiveits/opencode-go-cliproxyapi/compare/v0.2.1...v0.2.2
+### Upgrade notes
+
+- Replace the plugin binary and restart CLIProxyAPI.
+- No config change is required: existing `protocol-preference` and
+  `route-overrides` blocks keep working.
+- The reasoning cache is in-process, bounded (512 entries, 2 h TTL) and cleared
+  on restart. A conversation that spans a restart replays an empty placeholder
+  instead of a real summary — the request still succeeds.
+
+**Full Changelog**: https://github.com/s890214/opencode-go-cpa/commits/main

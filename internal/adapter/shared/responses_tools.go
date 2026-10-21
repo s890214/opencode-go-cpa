@@ -7,7 +7,18 @@ import (
 	"strings"
 
 	"opencode-go-cpa/internal/errclass"
+	"opencode-go-cpa/internal/reasoning"
 )
+
+// defaultReasoningStore backs every ResponseTools created without an
+// explicit store. The host process serves one manager, so a package-level
+// store is the process-wide cache: the executor writes to it while
+// translating a response, and the next request's translator reads back.
+var defaultReasoningStore = reasoning.New(reasoning.DefaultMaxEntries, reasoning.DefaultTTL)
+
+// DefaultReasoningStore exposes the process-wide cache (executor writes,
+// tests reset).
+func DefaultReasoningStore() *reasoning.Store { return defaultReasoningStore }
 
 // responseToolIdentity is the original (name, namespace) pair behind one
 // flattened wire name. A plain function tool carries an empty namespace.
@@ -20,14 +31,28 @@ type responseToolIdentity struct {
 }
 
 // ResponseTools tracks flattened namespace wire names to their original
-// identity so outbound function calls restore on the return path.
+// identity so outbound function calls restore on the return path, and
+// carries the reasoning cache the request translators read back.
 type ResponseTools struct {
-	names map[string]responseToolIdentity
+	names     map[string]responseToolIdentity
+	reasoning *reasoning.Store
 }
 
-// NewResponseTools prepares an empty namespace registry.
+// NewResponseTools prepares an empty namespace registry bound to the
+// process-wide reasoning cache.
 func NewResponseTools() *ResponseTools {
-	return &ResponseTools{names: make(map[string]responseToolIdentity)}
+	return &ResponseTools{
+		names:     make(map[string]responseToolIdentity),
+		reasoning: defaultReasoningStore,
+	}
+}
+
+// Reasoning returns the cache backing this conversion, never nil.
+func (t *ResponseTools) Reasoning() *reasoning.Store {
+	if t == nil || t.reasoning == nil {
+		return defaultReasoningStore
+	}
+	return t.reasoning
 }
 
 // ResponseToolContext resolves the registry for a request conversion:

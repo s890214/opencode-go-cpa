@@ -1401,6 +1401,10 @@ type claudeWireMessage struct {
 type claudeWireBlock struct {
 	Type   string `json:"type"`
 	Text   string `json:"text"`
+	// Thinking carries a thinking block's payload (Anthropic puts it in
+	// "thinking", not "text"); it is folded into ClaudeBlock.Text so
+	// adapters that must replay it do not need a second decoder.
+	Thinking string `json:"thinking"`
 	Source *struct {
 		Type      string `json:"type"` // base64 | url
 		MediaType string `json:"media_type"`
@@ -1512,6 +1516,8 @@ func decodeClaudeBlocks(raw json.RawMessage) ([]ClaudeBlock, *errclass.Error) {
 			blk.CallID = wb.ID
 		case "tool_result":
 			blk.CallID = wb.ToolUseID
+		case "thinking":
+			blk.Text = wb.Thinking
 		}
 		blocks = append(blocks, blk)
 	}

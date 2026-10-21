@@ -397,7 +397,7 @@ func TestExecuteChatRoute(t *testing.T) {
 	if wire["method"] != http.MethodPost {
 		t.Fatalf("bridged method = %v", wire["method"])
 	}
-	if wire["url"] != "https://opencode.ai/zen/go/v1/chat/completions" {
+	if wire["url"] != "https://opencode.ai/inference/go/v1/chat/completions" {
 		t.Fatalf("bridged url = %v", wire["url"])
 	}
 	headers := wire["headers"].(map[string]any)

@@ -34,6 +34,13 @@ This plugin exposes OpenCode Go as a single provider (`opencode-go`) backed by a
 - **Thinking & Reasoning Support**: Maps reasoning effort across supported client and upstream formats.
 - **Dynamic Catalog Discovery**: Fetches remote model catalogs with local fallback and custom route overrides.
 - **Multi-Key Auth Scheduling**: Pools multiple API keys with CLIProxyAPI's native scheduler for rotation, retries, and error cooldowns across all protocols.
+- **Thinking-mode pass-back**: OpenCode Go runs tool-calling turns in thinking mode and answers
+  `400 invalid_request_error` when the assistant turn that produced a call replays without its
+  reasoning. The plugin captures the upstream `reasoning_content` (Chat Completions) or `reasoning`
+  item (Responses) keyed by tool call id, and replays it on the next turn; when nothing was
+  captured it still emits the field so the turn round-trips instead of failing. Responses clients
+  such as Codex never receive that reasoning from the upstream, so without this they break on the
+  first tool result.
 - **Native quotas**: Rolling, weekly, and monthly quotas use CLIProxyAPI's generic quota endpoints and the selected credential. The separate plugin page is removed.
 
 ## Requirements
@@ -71,11 +78,11 @@ Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.op
 plugins:
   configs:
     opencode-go-cpa:
-      # Upstream base URL (default: "https://opencode.ai/zen/go/v1")
-      base-url: "https://opencode.ai/zen/go/v1"
+      # Upstream base URL (default: "https://opencode.ai/inference/go/v1")
+      base-url: "https://opencode.ai/inference/go/v1"
 
       # Optional catalog endpoint override (default: "{base-url}/models")
-      # catalog-url: "https://opencode.ai/zen/go/v1/models"
+      # catalog-url: "https://opencode.ai/inference/go/v1/models"
 
       # Client-facing model ID prefix configuration
       model-prefix:
@@ -125,7 +132,7 @@ plugins:
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `api-keys` | `[]object` | *(Required)* | List of API keys (`- value: "..."`, optional `name: "Personal"`). Supports `${ENV_VAR}` expansion. Duplicates and empty values are rejected. |
-| `base-url` | `string` | `https://opencode.ai/zen/go/v1` | Upstream base URL. Must be valid HTTPS (or HTTP if `allow-http: true`) without query parameters, fragments, or userinfo. |
+| `base-url` | `string` | `https://opencode.ai/inference/go/v1` | Upstream base URL. Must be valid HTTPS (or HTTP if `allow-http: true`) without query parameters, fragments, or userinfo. |
 | `catalog-url` | `string` | `{base-url}/models` | Full URL for catalog discovery. Defaults to `{base-url}/models`. |
 | `model-prefix.enabled` | `bool` | `true` | When `true`, client-facing model names use `<prefix>/<model>`. When `false`, uses bare model IDs. |
 | `model-prefix.value` | `string` | `opencode-go` | Provider prefix string when prefixing is enabled. |

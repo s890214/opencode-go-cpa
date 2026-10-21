@@ -344,6 +344,22 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 		index[rec.PublicID] = rec
 		index[rec.UpstreamID] = rec
 	}
+	// An entry whose model id is absent from the upstream catalog does
+	// nothing at all — the client keeps getting the default route and
+	// loses Responses-only features with no other symptom. Name it.
+	for id := range m.cfg.ProtocolPreference {
+		matched := false
+		for seenID := range seen {
+			if seenID == id || strings.EqualFold(seenID, id) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			warns = append(warns, fmt.Sprintf(
+				"protocol-preference[%q]: model is not in the upstream catalog; entry has no effect", id))
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.raw, m.models, m.index, m.unsup, m.warns = entries, models, index, unsup, warns
@@ -366,8 +382,19 @@ func (m *Manager) protocolEnabled(r Route) bool {
 // supportedProtocolsFor returns the configured pass-through protocols for a
 // model, de-duplicated. The default route stays in Protocol; this list only
 // enables the client's protocol when the upstream speaks it natively.
+// Lookup tolerates case differences against the configured id: the catalog
+// and the operator's config are maintained in different places, and a
+// silently inert entry looks exactly like a broken feature.
 func (m *Manager) supportedProtocolsFor(upstreamID string) []Route {
 	raw, ok := m.cfg.ProtocolPreference[upstreamID]
+	if !ok {
+		for name, protocols := range m.cfg.ProtocolPreference {
+			if strings.EqualFold(name, upstreamID) {
+				raw, ok = protocols, true
+				break
+			}
+		}
+	}
 	if !ok || len(raw) == 0 {
 		return nil
 	}
@@ -405,7 +432,7 @@ func (m *Manager) resolve(e rawModel) (Route, string, bool, string) {
 
 // JoinUpstreamURL joins the configured base-url onto an endpoint path and
 // is the single source of truth for that join (spec 05 §2): base-url
-// already carries the version segment (default .../zen/go/v1, catalog at
+// already carries the version segment (default .../inference/go/v1, catalog at
 // {base}/models), so a leading "/v1" on the endpoint is dropped instead of
 // doubled. The authority-escape check (endpointEscapesBase) must parse
 // exactly the URL this produces — two independent join formulas would be

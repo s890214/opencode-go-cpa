@@ -207,11 +207,16 @@ func TestBuildRequest_ResponsesToResponses_FunctionCallEmptyArgs(t *testing.T) {
 		t.Fatalf("BuildRequest err = %+v, want nil", eErr)
 	}
 	items := inputItems(t, decodeReq(t, out))
-	if len(items) != 2 {
+	// One reasoning placeholder leads the batch: the upstream refuses a
+	// tool call whose reasoning is missing while thinking mode is on.
+	if len(items) != 3 {
 		t.Fatalf("items = %d: %v", len(items), items)
 	}
+	if rs := itemMap(t, items, 0); rs["type"] != "reasoning" {
+		t.Fatalf("item0 = %v, want reasoning", rs)
+	}
 	for i, want := range []string{"c1", "c2"} {
-		fc := itemMap(t, items, i)
+		fc := itemMap(t, items, 1+i)
 		if fc["type"] != "function_call" || fc["call_id"] != want || fc["arguments"] != "{}" {
 			t.Errorf("function_call %d = %v, want arguments {}", i, fc)
 		}
@@ -348,7 +353,7 @@ func TestFromChatCompletionsFull(t *testing.T) {
 		t.Error("stop must be omitted (FR-005 policy)")
 	}
 	items := inputItems(t, m)
-	if len(items) != 5 {
+	if len(items) != 6 {
 		t.Fatalf("items = %d: %v", len(items), items)
 	}
 	u := itemMap(t, items, 0)
@@ -372,12 +377,17 @@ func TestFromChatCompletionsFull(t *testing.T) {
 	if p := partMap(t, a, 0); p["type"] != "output_text" || p["text"] != "checking" {
 		t.Errorf("assistant part = %v (want output_text)", p)
 	}
-	fc := itemMap(t, items, 3)
+	// Thinking mode requires a reasoning item ahead of every replayed tool
+	// call; without it the upstream rejects the whole turn with 400.
+	if rs := itemMap(t, items, 3); rs["type"] != "reasoning" {
+		t.Fatalf("item3 = %v, want reasoning placeholder", rs)
+	}
+	fc := itemMap(t, items, 4)
 	if fc["type"] != "function_call" || fc["call_id"] != "call_1" ||
 		fc["name"] != "lookup" || fc["arguments"] != `{"q":"x"}` {
 		t.Errorf("function_call = %v", fc)
 	}
-	fco := itemMap(t, items, 4)
+	fco := itemMap(t, items, 5)
 	if fco["type"] != "function_call_output" || fco["call_id"] != "call_1" || fco["output"] != "result" {
 		t.Errorf("function_call_output = %v", fco)
 	}
@@ -564,7 +574,7 @@ func TestFromClaudeMessagesFull(t *testing.T) {
 		t.Errorf("tool = %v", tl)
 	}
 	items := inputItems(t, m)
-	if len(items) != 12 {
+	if len(items) != 13 {
 		t.Fatalf("items = %d: %v", len(items), items)
 	}
 	if p := partMap(t, itemMap(t, items, 0), 0); p["type"] != "input_text" || p["text"] != "hello" {
@@ -577,35 +587,40 @@ func TestFromClaudeMessagesFull(t *testing.T) {
 	if p := partMap(t, a, 0); p["type"] != "output_text" || p["text"] != "working" {
 		t.Errorf("assistant part = %v", p)
 	}
+	// A thinking block ahead of tool_use replays as the reasoning item
+	// thinking mode requires; one item covers the parallel batch.
+	if rs := itemMap(t, items, 2); rs["type"] != "reasoning" {
+		t.Fatalf("item2 = %v, want reasoning", rs)
+	}
 	for i, want := range []struct{ id, args string }{
 		{"tu_1", `{"q":"x"}`}, {"tu_2", "{}"}, {"tu_3", "{}"}, {"tu_4", "{}"},
 	} {
-		fc := itemMap(t, items, 2+i)
+		fc := itemMap(t, items, 3+i)
 		if fc["type"] != "function_call" || fc["call_id"] != want.id || fc["arguments"] != want.args {
 			t.Errorf("function_call %d = %v, want %+v", i, fc, want)
 		}
 	}
-	fco := itemMap(t, items, 6)
+	fco := itemMap(t, items, 7)
 	if fco["output"] != "ok" || fco["call_id"] != "tu_1" {
 		t.Errorf("tool output 0 = %v", fco)
 	}
-	if got := itemMap(t, items, 7)["output"]; got != "part" {
+	if got := itemMap(t, items, 8)["output"]; got != "part" {
 		t.Errorf("tool output 1 = %v, want text only", got)
 	}
-	if got := itemMap(t, items, 8)["output"]; got != "[tool: web_search]" {
+	if got := itemMap(t, items, 9)["output"]; got != "[tool: web_search]" {
 		t.Errorf("tool output 2 = %v, want [tool: web_search]", got)
 	}
-	if got := itemMap(t, items, 9)["output"]; got != "[error] boom" {
+	if got := itemMap(t, items, 10)["output"]; got != "[error] boom" {
 		t.Errorf("is_error marker = %v", got)
 	}
-	img := itemMap(t, items, 10)
+	img := itemMap(t, items, 11)
 	if img["role"] != "user" {
 		t.Fatalf("item10 = %v", img)
 	}
 	if p := partMap(t, img, 0); p["type"] != "input_image" || p["image_url"] != "data:image/png;base64,AAAA" {
 		t.Errorf("base64 image part = %v", p)
 	}
-	if p := partMap(t, itemMap(t, items, 11), 0); p["text"] != "done" {
+	if p := partMap(t, itemMap(t, items, 12), 0); p["text"] != "done" {
 		t.Errorf("item11 = %v", p)
 	}
 }

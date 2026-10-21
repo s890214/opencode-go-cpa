@@ -38,9 +38,9 @@ func AuthHeaders(key string) http.Header {
 func BuildRequest(upstreamModel, sourceFormat string, sourceBody []byte, ts *pluginapi.ThinkingSupport, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
 	switch sourceFormat {
 	case "openai":
-		return buildOpenAIRequest(upstreamModel, sourceBody)
+		return buildOpenAIRequest(upstreamModel, sourceBody, shared.ResponseToolContext(tools))
 	case "claude":
-		return claudeToChat(upstreamModel, sourceBody, ts)
+		return claudeToChat(upstreamModel, sourceBody, ts, shared.ResponseToolContext(tools))
 	case "openai-response":
 		return responsesToChat(upstreamModel, sourceBody, ts, shared.ResponseToolContext(tools))
 	default:
@@ -48,11 +48,48 @@ func BuildRequest(upstreamModel, sourceFormat string, sourceBody []byte, ts *plu
 	}
 }
 
+// toolCallReasoning returns the reasoning that belongs to one tool call:
+// the text carried by the inbound request when it is still attached,
+// otherwise whatever the cache captured from the upstream answer that
+// produced the call, otherwise "". The empty string is a deliberate
+// placeholder — the upstream accepts reasoning_content:"" and only needs
+// the field to be present, so an unknown turn still round-trips instead
+// of failing with 400.
+func toolCallReasoning(store *shared.ResponseTools, callID, pending string, hasPending bool) *string {
+	text := ""
+	switch {
+	case hasPending:
+		text = pending
+	case len(callID) > 0:
+		if v, ok := store.Reasoning().Get(callID); ok {
+			text = v
+		}
+	}
+	return &text
+}
+
+// firstToolCallID extracts the id of the first tool call in a raw
+// Chat Completions tool_calls array ("" when absent or malformed).
+func firstToolCallID(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var calls []struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(raw, &calls) != nil || len(calls) == 0 {
+		return ""
+	}
+	return calls[0].ID
+}
+
 // buildOpenAIRequest rewrites the top-level model field of an OpenAI request
 // body to upstreamModel, normalizes role:"developer" messages to role:"system",
-// and strips any malformed top-level thinking object. DeepSeek models fail if
-// thinking lacks a valid string type field or if messages contain role:"developer".
-func buildOpenAIRequest(upstreamModel string, body []byte) ([]byte, *errclass.Error) {
+// strips any malformed top-level thinking object, and replays the reasoning of
+// every assistant tool call. DeepSeek models fail if thinking lacks a valid
+// string type field, if messages contain role:"developer", or if an assistant
+// turn carrying tool_calls has no reasoning_content while thinking mode is on.
+func buildOpenAIRequest(upstreamModel string, body []byte, tools *shared.ResponseTools) ([]byte, *errclass.Error) {
 	var req map[string]json.RawMessage
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, errclass.Translation("malformed openai request JSON: " + err.Error())
@@ -67,19 +104,44 @@ func buildOpenAIRequest(upstreamModel string, body []byte) ([]byte, *errclass.Er
 	}
 
 	var msgsModified bool
-	if rawMsgs, ok := req["messages"]; ok && strings.Contains(string(rawMsgs), `"developer"`) {
-		var msgs []map[string]json.RawMessage
-		if err := json.Unmarshal(rawMsgs, &msgs); err == nil {
-			for _, m := range msgs {
-				var role string
-				if err := json.Unmarshal(m["role"], &role); err == nil && role == "developer" {
-					m["role"] = json.RawMessage(`"system"`)
+	if rawMsgs, ok := req["messages"]; ok {
+		rawStr := string(rawMsgs)
+		needsDeveloper := strings.Contains(rawStr, `"developer"`)
+		needsReasoning := strings.Contains(rawStr, `"tool_calls"`)
+		if needsDeveloper || needsReasoning {
+			var msgs []map[string]json.RawMessage
+			if err := json.Unmarshal(rawMsgs, &msgs); err == nil {
+				for _, m := range msgs {
+					var role string
+					if err := json.Unmarshal(m["role"], &role); err != nil {
+						continue
+					}
+					if role == "developer" {
+						m["role"] = json.RawMessage(`"system"`)
+						msgsModified = true
+						role = "system"
+					}
+					if !needsReasoning || role != "assistant" {
+						continue
+					}
+					rawCalls, hasCalls := m["tool_calls"]
+					if !hasCalls || len(rawCalls) == 0 || string(rawCalls) == "null" {
+						continue
+					}
+					if _, hasReasoning := m["reasoning_content"]; hasReasoning {
+						continue
+					}
+					encoded, err := json.Marshal(*toolCallReasoning(tools, firstToolCallID(rawCalls), "", false))
+					if err != nil {
+						continue
+					}
+					m["reasoning_content"] = encoded
 					msgsModified = true
 				}
-			}
-			if msgsModified {
-				if b, err := json.Marshal(msgs); err == nil {
-					req["messages"] = b
+				if msgsModified {
+					if b, err := json.Marshal(msgs); err == nil {
+						req["messages"] = b
+					}
 				}
 			}
 		}
@@ -124,10 +186,15 @@ type ccContentPart struct {
 }
 
 type ccMessage struct {
-	Role       string              `json:"role"`
-	Content    any                 `json:"content"` // string, []ccContentPart, or nil
-	ToolCalls  []shared.CCToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string              `json:"tool_call_id,omitempty"`
+	Role     string              `json:"role"`
+	Content  any                 `json:"content"` // string, []ccContentPart, or nil
+	ToolCalls []shared.CCToolCall `json:"tool_calls,omitempty"`
+	// ReasoningContent replays the thinking that produced ToolCalls.
+	// Upstreams in thinking mode reject a tool turn without it, so the
+	// translators fill it from the reasoning cache; the pointer keeps an
+	// intentional empty string on the wire (omitempty drops nil only).
+	ReasoningContent *string `json:"reasoning_content,omitempty"`
+	ToolCallID       string  `json:"tool_call_id,omitempty"`
 }
 
 type ccRequest struct {
@@ -167,7 +234,7 @@ type claudeBlock = map[string]any
 // budget maps to a capability-aware reasoning_effort via
 // thinking.EffortFromBudget. Decoding is owned entirely by the shared
 // Claude-request kernel; only target-shape rendering stays local.
-func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport) ([]byte, *errclass.Error) {
+func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport, tools *shared.ResponseTools) ([]byte, *errclass.Error) {
 	src, eErr := shared.DecodeClaudeMessages(body)
 	if eErr != nil {
 		return nil, eErr
@@ -199,7 +266,7 @@ func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSuppo
 			}
 			out.Messages = append(out.Messages, msgs...)
 		case "assistant":
-			msg, eErr := claudeAssistantMessage(m)
+			msg, eErr := claudeAssistantMessage(m, tools)
 			if eErr != nil {
 				return nil, eErr
 			}
@@ -297,21 +364,25 @@ func claudeUserMessages(m *shared.ClaudeMessageRecord) ([]ccMessage, *errclass.E
 
 // claudeAssistantMessage converts an assistant turn: text blocks join
 // the message content, tool_use blocks become tool_calls. Historical
-// thinking and redacted_thinking blocks have no Chat Completions
-// representation and are omitted by the FR-005 explicit omission policy
-// (the forward-looking control maps via effortFromBudget instead; the
-// redacted variant is pure encrypted metadata). Returns nil for empty turns.
-func claudeAssistantMessage(m *shared.ClaudeMessageRecord) (*ccMessage, *errclass.Error) {
+// thinking blocks have no Chat Completions field of their own, but when
+// the turn carries tool calls the upstream insists on getting that
+// thinking back: it is replayed as reasoning_content, falling back to the
+// captured copy for the first call and then to an empty placeholder.
+// Returns nil for empty turns.
+func claudeAssistantMessage(m *shared.ClaudeMessageRecord, tools *shared.ResponseTools) (*ccMessage, *errclass.Error) {
 	msg := &ccMessage{Role: "assistant"}
 	var sb strings.Builder
 	sb.WriteString(m.Content)
+	var think strings.Builder
 	for i := range m.Blocks {
 		blk := &m.Blocks[i]
 		switch blk.Kind {
 		case "text":
 			sb.WriteString(blk.Text)
-		case "thinking", "redacted_thinking":
-			// omitted: no Chat Completions equivalent (FR-005 policy)
+		case "thinking":
+			think.WriteString(blk.Text)
+		case "redacted_thinking":
+			// omitted: encrypted metadata with no readable equivalent
 		case "tool_use":
 			tc := shared.CCToolCall{ID: blk.CallID, Type: "function"}
 			tc.Function.Name = blk.Name
@@ -326,6 +397,9 @@ func claudeAssistantMessage(m *shared.ClaudeMessageRecord) (*ccMessage, *errclas
 	}
 	if msg.Content == nil && len(msg.ToolCalls) == 0 {
 		return nil, nil
+	}
+	if len(msg.ToolCalls) > 0 {
+		msg.ReasoningContent = toolCallReasoning(tools, msg.ToolCalls[0].ID, think.String(), think.Len() > 0)
 	}
 	return msg, nil
 }
@@ -379,6 +453,8 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 		return nil, eErr
 	}
 	applyToolChoiceCC(out, kind, tcName)
+	var pendingReasoning string
+	var hasPendingReasoning bool
 	for _, item := range items {
 		switch item.Type {
 		case "message":
@@ -419,17 +495,22 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			tc := shared.CCToolCall{ID: item.CallID, Type: "function"}
 			tc.Function.Name = item.Name
 			tc.Function.Arguments = shared.DefaultArgs(args)
+			reasoning := toolCallReasoning(tools, item.CallID, pendingReasoning, hasPendingReasoning)
 			// Merge consecutive function_call items into one
 			// assistant message so multi-call turns round-trip.
 			if n := len(out.Messages); n > 0 {
 				last := &out.Messages[n-1]
 				if last.Role == "assistant" && last.Content == nil {
 					last.ToolCalls = append(last.ToolCalls, tc)
+					if last.ReasoningContent == nil {
+						last.ReasoningContent = reasoning
+					}
 					continue
 				}
 			}
 			out.Messages = append(out.Messages, ccMessage{
 				Role: "assistant", ToolCalls: []shared.CCToolCall{tc},
+				ReasoningContent: reasoning,
 			})
 		case "function_call_output", "custom_tool_call_output":
 			text, eErr := shared.RespOutputText(item.Output, "tool messages carry text only")
@@ -439,8 +520,16 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			out.Messages = append(out.Messages, ccMessage{
 				Role: "tool", Content: text, ToolCallID: item.CallID,
 			})
+			// Tool output closes the turn: a reasoning item that follows
+			// belongs to the next one.
+			pendingReasoning, hasPendingReasoning = "", false
 		case "reasoning":
-			// omitted: no Chat Completions equivalent (FR-005 policy)
+			// No Chat Completions field of its own, but the following
+			// function_call must replay it as reasoning_content or the
+			// upstream rejects the whole conversation with 400 while
+			// thinking mode is on.
+			pendingReasoning = respItemReasoning(item)
+			hasPendingReasoning = true
 		default:
 			return nil, shared.UnsupportedInputItemType(item.Type)
 		}
@@ -457,6 +546,29 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 		})
 	}
 	return encode(out), nil
+}
+
+// respItemReasoning extracts the thinking text carried by a Responses
+// reasoning item, preferring summary[] and falling back to content[].
+func respItemReasoning(item shared.RespItem) string {
+	var sb strings.Builder
+	for _, part := range item.Summary {
+		sb.WriteString(part.Text)
+	}
+	if sb.Len() > 0 {
+		return sb.String()
+	}
+	if len(item.Content) > 0 {
+		var parts []struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(item.Content, &parts) == nil {
+			for _, p := range parts {
+				sb.WriteString(p.Text)
+			}
+		}
+	}
+	return sb.String()
 }
 
 // respContent normalizes a Responses content field (JSON string or typed

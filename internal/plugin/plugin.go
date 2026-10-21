@@ -27,7 +27,7 @@ const ProviderID = "opencode-go"
 // pluginName / pluginVersion are reported in registration metadata.
 const (
 	pluginName    = "opencode-go-cpa"
-	pluginVersion = "0.3.0"
+	pluginVersion = "0.4.0"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
@@ -197,7 +197,7 @@ func pluginConfigFields() []pluginapi.ConfigField {
 		{
 			Name:        "base-url",
 			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Upstream base URL (default: https://opencode.ai/zen/go/v1).",
+			Description: "Upstream base URL (default: https://opencode.ai/inference/go/v1).",
 		},
 		{
 			Name:        "catalog-url",
@@ -223,6 +223,11 @@ func pluginConfigFields() []pluginapi.ConfigField {
 			Name:        "route-overrides",
 			Type:        pluginapi.ConfigFieldTypeObject,
 			Description: "Explicit route overrides per model (`<model-id>: {protocol: string, endpoint: string}`).",
+		},
+		{
+			Name:        "protocol-preference",
+			Type:        pluginapi.ConfigFieldTypeObject,
+			Description: "Protocols each model speaks natively (`<model-id>: [chat-completions|responses|messages]`). A client using a listed protocol is passed through unmodified instead of being translated to the model's default route, which preserves Responses-only features (web_search, custom tools).",
 		},
 		{
 			Name:        "request-timeout",
