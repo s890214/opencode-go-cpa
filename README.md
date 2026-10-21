@@ -1,4 +1,7 @@
-# OpenCode Go CLIProxyAPI Plugin
+# OpenCode Go CLIProxyAPI Plugin (opencode-go-cpa)
+
+> Forked from [massiveits/opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi) (MIT).
+> This fork adds per-request protocol preference (native pass-through) and keeps `apply_patch` on native Responses routes.
 
 A native dynamic Go plugin for [CLIProxyAPI](https://help.router-for.me/plugin/development) that exposes OpenCode Go as a single provider (`opencode-go`).
 
@@ -90,6 +93,14 @@ plugins:
       catalog:
         refresh-interval: "15m"          # discovery refresh cadence, min "1m" (default: "15m")
         stale-while-unavailable: true    # retain last good catalog snapshot on refresh failure (default: true)
+
+      # Per-model protocol preference: list the protocols the upstream
+      # natively supports. If the client's protocol is listed, the request is
+      # passed through unmodified (no translation); otherwise it falls back to
+      # the model's default route.
+      protocol-preference:
+        deepseek-v4.1-flash: ["chat-completions", "responses", "messages"]
+        claude-haiku-5-5: ["messages"]
 
       # Protocol enable/disable switches (all default to true)
       protocols:
