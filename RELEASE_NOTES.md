@@ -11,11 +11,13 @@ answers:
 must be passed back to the API.
 ```
 
-Codex speaks the Responses protocol and only replays the call item plus its
-output; the upstream Responses endpoint never hands it the reasoning
-(`reasoning_tokens` is 0), so every conversation broke on the first tool
-result.
+What actually broke it: the translator dropped the `reasoning` input items a
+Responses client sends back. Codex does send them — `summary[]` plus an opaque
+`encrypted_content` blob — and the upstream accepts that shape as-is, so
+discarding the item made every tool turn look reasoning-free.
 
+- Forward those items verbatim when the summary carries text; the upstream
+  reads summary text only and ignores `encrypted_content`.
 - Capture the upstream thinking keyed by tool call id, on both streaming and
   non-streaming responses, for Chat Completions and Responses routes.
 - Replay it on the next turn: `reasoning_content` for Chat Completions

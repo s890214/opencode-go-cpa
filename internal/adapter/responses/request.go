@@ -208,7 +208,18 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 					}
 					pendingReasoning = reasoning.TextFromResponseItem(item)
 					hasPendingReasoning = true
-					preserved = append(preserved, reasoning.ResponseItem(pendingReasoning))
+					// Replay the client's own item verbatim when it carries
+					// summary text. Codex sends summary[] plus an
+					// encrypted_content blob and the upstream accepts that
+					// shape as-is; rebuilding it would only discard fields.
+					// The upstream reads summary text and ignores
+					// encrypted_content, so an item with an empty summary
+					// still needs the text placeholder to satisfy it.
+					if strings.TrimSpace(pendingReasoning) == "" {
+						preserved = append(preserved, reasoning.ResponseItem(pendingReasoning))
+					} else {
+						preserved = append(preserved, item)
+					}
 					lastWasReasoning = true
 				case "function_call":
 					var m map[string]json.RawMessage

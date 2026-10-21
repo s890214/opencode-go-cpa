@@ -36,11 +36,12 @@ This plugin exposes OpenCode Go as a single provider (`opencode-go`) backed by a
 - **Multi-Key Auth Scheduling**: Pools multiple API keys with CLIProxyAPI's native scheduler for rotation, retries, and error cooldowns across all protocols.
 - **Thinking-mode pass-back**: OpenCode Go runs tool-calling turns in thinking mode and answers
   `400 invalid_request_error` when the assistant turn that produced a call replays without its
-  reasoning. The plugin captures the upstream `reasoning_content` (Chat Completions) or `reasoning`
-  item (Responses) keyed by tool call id, and replays it on the next turn; when nothing was
-  captured it still emits the field so the turn round-trips instead of failing. Responses clients
-  such as Codex never receive that reasoning from the upstream, so without this they break on the
-  first tool result.
+  reasoning. Earlier versions discarded the `reasoning` input items a Responses client sends
+  back — and Codex does send them (`summary[]` plus an opaque `encrypted_content`) — so every
+  tool-result turn looked reasoning-free to the upstream. Those items are now forwarded verbatim
+  when they carry summary text; the upstream reads the summary text only and ignores
+  `encrypted_content`. When the client sends none, the plugin fills in the captured reasoning or
+  a neutral placeholder instead of failing the turn.
 - **Native quotas**: Rolling, weekly, and monthly quotas use CLIProxyAPI's generic quota endpoints and the selected credential. The separate plugin page is removed.
 
 ## Requirements

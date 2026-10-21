@@ -73,6 +73,59 @@ func TestOrphanReasoningStillDropped(t *testing.T) {
 	}
 }
 
+// Codex really does send its reasoning items back — with summary[] plus an
+// opaque encrypted_content blob. The upstream accepts that exact shape, so
+// the item must be forwarded verbatim instead of rebuilt into a bare
+// summary (which would drop the id and the blob).
+func TestReasoningItemReplayedVerbatim(t *testing.T) {
+	shared.DefaultReasoningStore().Reset()
+	body := []byte(`{"input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+		{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"I should list the directory."}],"encrypted_content":"opaque-blob"},
+		{"type":"function_call","call_id":"c1","name":"exec_command","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c1","output":"a.txt"}
+	]}`)
+	out, eErr := BuildRequest("deepseek-v4.1-flash", "openai-response", body, nil)
+	if eErr != nil {
+		t.Fatalf("BuildRequest err = %+v", eErr)
+	}
+	rs := itemMap(t, inputItems(t, decodeReq(t, out)), 1)
+	if rs["type"] != "reasoning" {
+		t.Fatalf("item1 = %v", rs)
+	}
+	if rs["encrypted_content"] != "opaque-blob" {
+		t.Fatalf("encrypted_content dropped: %v", rs)
+	}
+	if rs["id"] != "rs_1" {
+		t.Fatalf("id dropped: %v", rs)
+	}
+}
+
+// An item with no summary text still has to satisfy the upstream, which
+// reads summary text only and ignores encrypted_content.
+func TestEmptySummaryReasoningGetsPlaceholder(t *testing.T) {
+	shared.DefaultReasoningStore().Reset()
+	body := []byte(`{"input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+		{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque-blob"},
+		{"type":"function_call","call_id":"c1","name":"exec_command","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c1","output":"a.txt"}
+	]}`)
+	out, eErr := BuildRequest("deepseek-v4.1-flash", "openai-response", body, nil)
+	if eErr != nil {
+		t.Fatalf("BuildRequest err = %+v", eErr)
+	}
+	rs := itemMap(t, inputItems(t, decodeReq(t, out)), 1)
+	summary, ok := rs["summary"].([]any)
+	if !ok || len(summary) != 1 {
+		t.Fatalf("summary = %v", rs["summary"])
+	}
+	part, _ := summary[0].(map[string]any)
+	if part["text"] == "" {
+		t.Fatalf("placeholder text missing: %v", part)
+	}
+}
+
 // Chat-sourced history has the same requirement on the Responses wire.
 func TestChatToolCallsGetReasoningItem(t *testing.T) {
 	shared.DefaultReasoningStore().Reset()
