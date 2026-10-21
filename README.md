@@ -79,10 +79,24 @@ Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.op
 plugins:
   configs:
     opencode-go-cpa:
-      # Upstream base URL (default: "https://opencode.ai/inference/go/v1")
-      base-url: "https://opencode.ai/inference/go/v1"
+      # Upstream service root (default: "https://opencode.ai/inference/go").
+      # Every other path below is appended to it verbatim.
+      base-url: "https://opencode.ai/inference/go"
 
-      # Optional catalog endpoint override (default: "{base-url}/models")
+      # Where each protocol lives, appended to base-url as-is.
+      # Defaults are the upstream's generic paths; the documented layout is
+      # chat/responses under /openai/v1/ and messages under /anthropic/v1/.
+      protocol-endpoints:
+        chat-completions: "/openai/v1/chat/completions"
+        responses: "/openai/v1/responses"
+        messages: "/anthropic/v1/messages"
+
+      # Usage/quota endpoint (default: "/v1/usage"). Not a protocol endpoint,
+      # so it has its own setting.
+      # quota-path: "/v1/usage"
+
+      # Catalog discovery (default: "{base-url}/v1/models"). Also separate,
+      # because the upstream serves the model list outside the protocol paths.
       # catalog-url: "https://opencode.ai/inference/go/v1/models"
 
       # Client-facing model ID prefix configuration
@@ -149,8 +163,10 @@ plugins:
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `api-keys` | `[]object` | *(Required)* | List of API keys (`- value: "..."`, optional `name: "Personal"`). Supports `${ENV_VAR}` expansion. Duplicates and empty values are rejected. |
-| `base-url` | `string` | `https://opencode.ai/inference/go/v1` | Upstream base URL. Must be valid HTTPS (or HTTP if `allow-http: true`) without query parameters, fragments, or userinfo. |
-| `catalog-url` | `string` | `{base-url}/models` | Full URL for catalog discovery. Defaults to `{base-url}/models`. |
+| `base-url` | `string` | `https://opencode.ai/inference/go` | Upstream service root. Every path below appends to it verbatim. Must be valid HTTPS (or HTTP if `allow-http: true`) without query parameters, fragments, or userinfo. |
+| `protocol-endpoints` | `map` | `/v1/{chat/completions,responses,messages}` | Path of each protocol, appended to `base-url`. Change these when the upstream moves an endpoint. |
+| `quota-path` | `string` | `/v1/usage` | Usage/quota endpoint, relative to `base-url`. Separate from the protocol endpoints. |
+| `catalog-url` | `string` | `{base-url}/v1/models` | Full URL for catalog discovery. Separate from the protocol endpoints because the upstream serves the model list on its own path. |
 | `model-prefix.enabled` | `bool` | `true` | When `true`, client-facing model names use `<prefix>/<model>`. When `false`, uses bare model IDs. |
 | `model-prefix.value` | `string` | `opencode-go` | Provider prefix string when prefixing is enabled. |
 | `catalog.refresh-interval` | `duration` | `15m` | Interval between catalog polling refreshes (e.g. `15m`, `1h`). Minimum is `1m`. |
