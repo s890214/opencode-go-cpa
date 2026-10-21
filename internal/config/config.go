@@ -15,7 +15,7 @@ import (
 
 // Defaults (spec 04 §2/§4).
 const (
-	DefaultBaseURL          = "https://opencode.ai/inference/go/v1"
+	DefaultBaseURL          = "https://opencode.ai/inference/go"
 	DefaultModelPrefix      = "opencode-go"
 	DefaultRefreshInterval  = 15 * time.Minute
 	DefaultRequestTimeout   = 5 * time.Minute
@@ -252,7 +252,10 @@ func Load(yamlBytes []byte) (Config, error) {
 		// catalog-url cannot double up separators downstream.
 		c.CatalogURL = strings.TrimRight(*raw.CatalogURL, "/")
 	} else {
-		c.CatalogURL = strings.TrimRight(c.BaseURL, "/") + "/models"
+		// The catalog is not a protocol endpoint: it lives at /v1/models on
+		// this upstream, so it is derived separately and can be overridden
+		// with catalog-url.
+		c.CatalogURL = strings.TrimRight(c.BaseURL, "/") + "/v1/models"
 	}
 	if err := c.validate(); err != nil {
 		return Config{}, err

@@ -25,7 +25,7 @@ func TestLoadMinimalAppliesAllDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(minimal) failed: %v", err)
 	}
-	if c.BaseURL != "https://opencode.ai/inference/go/v1" {
+	if c.BaseURL != "https://opencode.ai/inference/go" {
 		t.Errorf("BaseURL = %q", c.BaseURL)
 	}
 	if c.CatalogURL != "https://opencode.ai/inference/go/v1/models" {
@@ -148,13 +148,13 @@ func TestLoadDerivedCatalogURLFromCustomBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if c.CatalogURL != "https://upstream.example.com/api/models" {
+	if c.CatalogURL != "https://upstream.example.com/api/v1/models" {
 		t.Errorf("CatalogURL = %q", c.CatalogURL)
 	}
 }
 
 func TestLoadDerivedCatalogURLTrimsTrailingSlash(t *testing.T) {
-	c, err := Load([]byte("base-url: https://opencode.ai/inference/go/v1/\n" + withKey))
+	c, err := Load([]byte("base-url: https://opencode.ai/inference/go/\n" + withKey))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}

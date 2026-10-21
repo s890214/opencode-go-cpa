@@ -386,10 +386,8 @@ func (st *mockOpenCode) chatRequest(t *testing.T) (path, auth string, body map[s
 }
 
 func integrationYAML(baseURL string) string {
-	// The real base-url carries the version segment (.../zen/go/v1); the
-	// mock server root therefore gets "/v1" appended so /v1/models and
-	// /v1/chat/completions line up.
-	return fmt.Sprintf("base-url: %s/v1\nallow-http: true\napi-keys:\n  - value: sk-test-1\n", baseURL)
+	// base-url is the service root; protocol-endpoints carry the dated paths.
+	return fmt.Sprintf("base-url: %s\nallow-http: true\napi-keys:\n  - value: sk-test-1\n", baseURL)
 }
 
 // newIntegrationManager registers a manager whose outbound calls flow
@@ -1055,7 +1053,7 @@ func TestResponsesUnsupportedFeatureDescriptive(t *testing.T) {
 // ---- AC §E upstream errors + §F security, end to end -------------------
 
 func integrationTwoKeyYAML(baseURL string) string {
-	return fmt.Sprintf("base-url: %s/v1\nallow-http: true\napi-keys:\n  - value: sk-test-1\n  - value: sk-test-2\n", baseURL)
+	return fmt.Sprintf("base-url: %s\nallow-http: true\napi-keys:\n  - value: sk-test-1\n  - value: sk-test-2\n", baseURL)
 }
 
 func newTwoKeyManager(t *testing.T) (*Manager, *fakeCaller, *mockOpenCode) {
@@ -1151,7 +1149,7 @@ func TestHTTPSDefaultEnforced(t *testing.T) {
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 
-	httpYAML := fmt.Sprintf("base-url: %s/v1\napi-keys:\n  - value: sk-test-1\n", st.srv.URL)
+	httpYAML := fmt.Sprintf("base-url: %s\napi-keys:\n  - value: sk-test-1\n", st.srv.URL)
 	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(httpYAML))
 	if err != nil {
 		t.Fatalf("register: %v", err)

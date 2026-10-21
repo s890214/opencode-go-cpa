@@ -42,13 +42,10 @@ const (
 // routeEndpoints maps each route to its upstream endpoint path.
 // routeEndpoints is the last-resort default of each protocol's path, used
 // only when neither `models.*.endpoints` nor `protocol-endpoints` override it.
-// These are the upstream's *generic alias* paths (/go/v1/...), which also
-// serve chat, responses and messages. Its documented layout is different —
-// /go/openai/v1/{chat/completions,responses} and /go/anthropic/v1/messages —
-// and that is what a real deployment should pin in `protocol-endpoints`.
-// JoinUpstreamURL also strips a leading "/v1" from the endpoint, so a base of
-// ".../go/v1" plus "/v1/chat/completions" resolves to ".../go/v1/chat/completions"
-// rather than a doubled segment.
+// base-url is the service root (…/inference/go) and these are appended
+// verbatim. The values are the upstream's *generic* paths, which serve all
+// three protocols; its documented layout is /openai/v1/… and /anthropic/v1/…,
+// and a real deployment pins those in `protocol-endpoints`.
 var routeEndpoints = map[Route]string{
 	RouteChatCompletions: "/v1/chat/completions",
 	RouteMessages:        "/v1/messages",
@@ -527,7 +524,11 @@ func (m *Manager) resolve(e rawModel) (Route, string, bool, string) {
 // exactly the URL this produces — two independent join formulas would be
 // free to drift apart and validate one URL while sending another.
 func JoinUpstreamURL(baseURL, endpoint string) string {
-	return strings.TrimSuffix(baseURL, "/") + strings.TrimPrefix(endpoint, "/v1")
+	// Plain concatenation. The previous version stripped a leading "/v1" from
+	// the endpoint, which silently rewrote "/v1/chat/completions" into
+	// "/chat/completions" and made two different path schemes look
+	// interchangeable. Endpoints are now spelled out in full.
+	return strings.TrimSuffix(baseURL, "/") + "/" + strings.TrimPrefix(endpoint, "/")
 }
 
 // endpointEscapesBase reports whether joining baseURL with endpoint via

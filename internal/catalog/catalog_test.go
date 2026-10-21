@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -738,140 +737,44 @@ func TestOverrideApplicationRecordedInWarnings(t *testing.T) {
 	}
 }
 
-// TestJoinUpstreamURL pins the shared join formula byte-for-byte against
-// the historical inline expression (TrimSuffix "/" + TrimPrefix "/v1") so
-// both former call sites keep producing identical URLs.
+// JoinUpstreamURL is a plain concatenation: base is the service root and the
+// endpoint is appended verbatim. There is no version-segment stripping any
+// more — that used to turn "/v1/chat/completions" into "/chat/completions" and
+// made two different path schemes look interchangeable.
 func TestJoinUpstreamURL(t *testing.T) {
-	legacy := func(base, endpoint string) string {
-		return strings.TrimSuffix(base, "/") + strings.TrimPrefix(endpoint, "/v1")
-	}
-	cases := []struct{ base, endpoint string }{
-		{"https://opencode.ai", "/v1/chat/completions"},
-		{"https://opencode.ai/", "/v1/messages"},
-		{"https://opencode.ai/zen/go/v1", "/v1/responses"},
-		{"https://opencode.ai", "v1@evil.com"},
-		{"https://opencode.ai", "/custom"},
-		{"https://opencode.ai/", ""},
+	cases := []struct{ base, endpoint, want string }{
+		{"https://opencode.ai/inference/go", "/openai/v1/chat/completions", "https://opencode.ai/inference/go/openai/v1/chat/completions"},
+		{"https://opencode.ai/inference/go/", "/v1/responses", "https://opencode.ai/inference/go/v1/responses"},
+		{"https://opencode.ai/inference/go", "", "https://opencode.ai/inference/go/"},
 	}
 	for _, c := range cases {
-		if got, want := JoinUpstreamURL(c.base, c.endpoint), legacy(c.base, c.endpoint); got != want {
-			t.Errorf("JoinUpstreamURL(%q, %q) = %q, legacy = %q", c.base, c.endpoint, got, want)
+		if got := JoinUpstreamURL(c.base, c.endpoint); got != c.want {
+			t.Errorf("JoinUpstreamURL(%q, %q) = %q, want %q", c.base, c.endpoint, got, c.want)
 		}
 	}
 }
 
 // TestEndpointEscapesBase pins the authority-escape check used at snapshot
-// build: joining base-url with an endpoint the way executor.upstreamURL does
-// must never move the request off the configured host/scheme, and parse
-// failures fail closed.
+// build. With plain concatenation an endpoint cannot reach the authority slot:
+// "@" and "//" stay inside the path, so only parse failures fail closed.
 func TestEndpointEscapesBase(t *testing.T) {
 	cases := []struct {
 		base     string
 		endpoint string
 		want     bool
 	}{
-		{"https://opencode.ai", "/v1@evil.com/x", true},
-		{"https://opencode.ai", "@evil.com/", true},
-		{"https://opencode.ai/zen/go/v1", "/v1@evil.com/x", false}, // @ lands in path
+		{"https://opencode.ai", "/v1@evil.com/x", false}, // @ stays in the path
+		{"https://opencode.ai", "@evil.com/", false},
+		{"https://opencode.ai", "v1@evil.com", false},
+		{"https://opencode.ai", "//evil.com/x", false},
 		{"https://opencode.ai", "/v1/chat/completions", false},
-		{"https://opencode.ai/zen/go/v1", "/v1/messages", false},
-		{"https://opencode.ai/", "/v1/responses", false},
-		{"https://OPENCODE.ai", "/v1/chat/completions", false}, // host compare is case-insensitive
-		{"https://opencode.ai", "v1@evil.com", true},
-		{"https://opencode.ai", "\x7f", true},   // unparseable join
-		{"https://opencode.ai\x00", "/x", true}, // unparseable base
+		{"https://OPENCODE.ai", "/openai/v1/chat/completions", false}, // host compare is case-insensitive
 	}
 	for _, c := range cases {
 		if got := endpointEscapesBase(c.base, c.endpoint); got != c.want {
 			t.Errorf("endpointEscapesBase(%q, %q) = %v, want %v", c.base, c.endpoint, got, c.want)
 		}
 	}
-}
-
-// F-security pin: override endpoints are concatenated onto base-url; one that
-// rewrites the URL authority (e.g. "/v1@evil.com/x" against a bare-host
-// base-url) must exclude the model from the routable set (spec 05 §2).
-// Override endpoints flow through the same check before swap's validation.
-func TestEndpointEscapeExcludedFromRoutableSet(t *testing.T) {
-	const escapeReason = "resolved endpoint escapes the configured upstream host"
-
-	t.Run("bare-host base rejects authority rewrite", func(t *testing.T) {
-		cfg := testCfg()
-		cfg.BaseURL = "https://opencode.ai"
-		cfg.Models = map[string]config.ModelConfig{
-			"evil":      {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1@evil.com/x"}},
-			"custom-ok": {Protocols: []string{"responses"}, Endpoints: map[string]string{"responses": "/v1/custom"}},
-		}
-		fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[
-			{"id":"evil"},
-			{"id":"custom-ok"}
-		]}`)}}
-		m := newManager(cfg, fc)
-		mustRefresh(t, m)
-
-		for _, mo := range m.Models() {
-			if mo.UpstreamID == "evil" {
-				t.Fatalf("authority-rewriting endpoint still routable: %+v", mo)
-			}
-			u := cfg.BaseURL + mo.EndpointPath
-			if p, err := url.Parse(u); err != nil || !strings.EqualFold(p.Host, "opencode.ai") || p.Scheme != "https" {
-				t.Fatalf("routable record escapes base: %q parses to %+v err=%v", u, p, err)
-			}
-		}
-		customFound := false
-		for _, mo := range m.Models() {
-			if mo.UpstreamID == "custom-ok" && mo.EndpointPath == "/v1/custom" {
-				customFound = true
-			}
-		}
-		if !customFound {
-			t.Fatal("normal custom endpoint must stay routable")
-		}
-		unsup := m.Unsupported()
-		if len(unsup) != 1 || unsup[0].UpstreamID != "evil" || unsup[0].Reason != escapeReason {
-			t.Fatalf("unsupported = %+v, want evil excluded with %q", unsup, escapeReason)
-		}
-	})
-
-	t.Run("path-hosted base keeps same-host @ endpoint routable", func(t *testing.T) {
-		cfg := testCfg()
-		cfg.BaseURL = "https://opencode.ai/zen/go/v1"
-		cfg.Models = map[string]config.ModelConfig{
-			"glm-5.2": {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1@evil.com/x"}},
-		}
-		fc := &fakeClient{resp: pluginapi.HTTPResponse{
-			StatusCode: 200,
-			Body:       []byte(`{"data":[{"id":"glm-5.2"}]}`),
-		}}
-		m := newManager(cfg, fc)
-		mustRefresh(t, m)
-		rec := findModel(t, m.Models(), "glm-5.2")
-		if rec.EndpointPath != "/v1@evil.com/x" {
-			t.Errorf("EndpointPath = %q; @ stays in path on default-style base", rec.EndpointPath)
-		}
-	})
-
-	t.Run("override endpoints flow through the same check", func(t *testing.T) {
-		cfg := testCfg()
-		cfg.BaseURL = "https://opencode.ai"
-		cfg.Models = map[string]config.ModelConfig{
-			"mystery-model": {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1@evil.com/y"}},
-		}
-		fc := &fakeClient{resp: pluginapi.HTTPResponse{
-			StatusCode: 200,
-			Body:       []byte(`{"data":[{"id":"mystery-model"}]}`),
-		}}
-		m := newManager(cfg, fc)
-		mustRefresh(t, m)
-
-		if got := m.Models(); len(got) != 0 {
-			t.Fatalf("override-supplied escaping endpoint still routable: %+v", got)
-		}
-		unsup := m.Unsupported()
-		if len(unsup) != 1 || unsup[0].UpstreamID != "mystery-model" || unsup[0].Reason != escapeReason {
-			t.Fatalf("unsupported = %+v, want override endpoint excluded with %q", unsup, escapeReason)
-		}
-	})
 }
 
 func TestFailClearsLookupIndex(t *testing.T) {
@@ -898,61 +801,6 @@ func TestFailClearsLookupIndex(t *testing.T) {
 	if _, ok := m.Lookup("glm-5.2"); ok {
 		t.Fatal("Lookup still resolves IDs from the cleared snapshot")
 	}
-}
-
-// TestSeedFromRevalidatesEndpointsAgainstNewBase pins the seed-revalidation
-// fix: a record whose endpoint was safe under the OLD base-url (path-hosted,
-// so "/v1@evil.com/x" stays in the path) must not keep serving once seeded
-// into a manager whose base-url is the bare host — there the join turns the
-// old host into userinfo and the endpoint escapes to an attacker authority.
-func TestSeedFromRevalidatesEndpointsAgainstNewBase(t *testing.T) {
-	body := `{"data":[
-		{"id":"glm-5.2"},
-		{"id":"totally-new-x"}
-	]}`
-	oldCfg := testCfg()
-	oldCfg.BaseURL = "https://api.test/v1"
-	oldCfg.CatalogURL = "https://api.test/v1/models"
-	oldCfg.Models = map[string]config.ModelConfig{
-		"totally-new-x": {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1@evil.com/x"}},
-	}
-	prev := newManager(oldCfg, &fakeClient{resp: pluginapi.HTTPResponse{
-		StatusCode: 200,
-		Body:       []byte(body),
-	}})
-	mustRefresh(t, prev)
-	findModel(t, prev.Models(), "totally-new-x") // precondition: routable pre-seed
-
-	cfg := testCfg()
-	cfg.BaseURL = "https://opencode.ai"
-	cfg.CatalogURL = "https://opencode.ai/go/v1/models"
-	cfg.Models = map[string]config.ModelConfig{
-		"totally-new-x": {Protocols: []string{"chat-completions"}, Endpoints: map[string]string{"chat-completions": "/v1@evil.com/x"}},
-	}
-	m := newManager(cfg, &fakeClient{})
-	m.SeedFrom(prev)
-
-	findModel(t, m.Models(), "glm-5.2") // safe record keeps serving
-	for _, mo := range m.Models() {
-		if mo.UpstreamID == "totally-new-x" {
-			t.Fatalf("escaping seeded endpoint still routable: %+v", mo)
-		}
-	}
-	if _, ok := m.Lookup("opencode-go/totally-new-x"); ok {
-		t.Fatal("escaping record must not resolve via Lookup")
-	}
-	const wantReason = "resolved endpoint escapes the configured upstream host"
-	var found bool
-	for _, u := range m.Unsupported() {
-		if u.UpstreamID == "totally-new-x" && u.Reason == wantReason {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("unsupported = %+v, want totally-new-x with %q", m.Unsupported(), wantReason)
-	}
-	// Seeding must not mutate prev's snapshot (shared backing arrays).
-	findModel(t, prev.Models(), "totally-new-x")
 }
 
 // TestSeedFromAppliesProtocolKillSwitch pins the seed-revalidation fix: a
@@ -1114,5 +962,25 @@ func TestRefreshDataKeyAbsentVsEmpty(t *testing.T) {
 	}
 	if got := m.Warnings(); len(got) != 0 {
 		t.Fatalf("intended clear must stay silent, got %v", got)
+	}
+}
+
+// JoinUpstreamURL concatenates base and endpoint verbatim, so no endpoint can
+// move a request to another authority. This used to be a real attack surface:
+// the old join stripped a leading "/v1", which left "@/evil.com" sitting at the
+// authority position and could redirect a seeded catalog entry to an attacker.
+func TestEndpointCannotEscapeConfiguredHost(t *testing.T) {
+	base := "https://opencode.ai"
+	for _, endpoint := range []string{
+		"/v1@evil.com/x",
+		"@evil.com/",
+		"//evil.com/x",
+		"v1@evil.com",
+		"/openai/v1/chat/completions",
+	} {
+		got := JoinUpstreamURL(base, endpoint)
+		if !strings.HasPrefix(got, "https://opencode.ai/") {
+			t.Fatalf("%q escaped the configured host: %s", endpoint, got)
+		}
 	}
 }

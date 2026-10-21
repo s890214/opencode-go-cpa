@@ -1137,7 +1137,7 @@ func TestShutdownAbortsInFlightTickRefresh(t *testing.T) {
 // catalog-url instead of the old one forever.
 func TestReconfigureFailedRefreshSeedsCarryoverThenFetchesNewURL(t *testing.T) {
 	oldURL := "https://opencode.ai/inference/go/v1/models"
-	newURL := "https://mirror.test/api/models"
+	newURL := "https://mirror.test/api/v1/models"
 	catalogV1 := `{"data":[{"id":"glm-5.3"}]}`
 	catalogV2 := `{"data":[{"id":"minimax-m3"}]}`
 	var allowOldURL atomic.Bool
