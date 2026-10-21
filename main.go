@@ -64,7 +64,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 
-	"opencode-go-cliproxyapi/internal/plugin"
+	"opencode-go-cpa/internal/plugin"
 )
 
 func main() {}

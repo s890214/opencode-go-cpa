@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"opencode-go-cliproxyapi/internal/adapter/shared"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"opencode-go-cpa/internal/adapter/shared"
+	"opencode-go-cpa/internal/errclass"
 )
 
 func feed(t *testing.T, sc *StreamConverter, chunks ...string) ([][]byte, bool, *errclass.Error) {

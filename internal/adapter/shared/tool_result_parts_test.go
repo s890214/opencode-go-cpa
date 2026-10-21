@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"opencode-go-cliproxyapi/internal/errclass"
+	"opencode-go-cpa/internal/errclass"
 )
 
 func TestToolResultPartsTextParity(t *testing.T) {

@@ -20,7 +20,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/config"
+	"opencode-go-cpa/internal/config"
 )
 
 // catalogBudgetFloor keeps an undersized max-response-bytes knob from
@@ -65,6 +65,10 @@ type ModelRecord struct {
 	UpstreamID   string
 	DisplayName  string
 	Protocol     Route
+	// SupportedProtocols lists the upstream protocols this model accepts
+	// natively (from protocol-preference); the client's protocol wins when
+	// it appears here, otherwise Protocol is used as the translation target.
+	SupportedProtocols []Route
 	EndpointPath string
 	ContextLimit int64
 	OutputLimit  int64
@@ -308,6 +312,7 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			UpstreamID:   e.ID,
 			DisplayName:  display,
 			Protocol:     route,
+			SupportedProtocols: m.supportedProtocolsFor(e.ID),
 			EndpointPath: endpoint,
 			ContextLimit: e.ContextLength,
 			OutputLimit:  e.MaxOutputTokens,
@@ -356,6 +361,27 @@ func (m *Manager) protocolEnabled(r Route) bool {
 		return m.cfg.Protocols.Responses
 	}
 	return true
+}
+
+// supportedProtocolsFor returns the configured pass-through protocols for a
+// model, de-duplicated. The default route stays in Protocol; this list only
+// enables the client's protocol when the upstream speaks it natively.
+func (m *Manager) supportedProtocolsFor(upstreamID string) []Route {
+	raw, ok := m.cfg.ProtocolPreference[upstreamID]
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	out := make([]Route, 0, len(raw))
+	seen := make(map[Route]struct{}, len(raw))
+	for _, name := range raw {
+		route := Route(name)
+		if _, dup := seen[route]; dup {
+			continue
+		}
+		seen[route] = struct{}{}
+		out = append(out, route)
+	}
+	return out
 }
 
 // resolve applies route priority strictly: user override, compatibility

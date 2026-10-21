@@ -13,8 +13,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/catalog"
-	"opencode-go-cliproxyapi/internal/config"
+	"opencode-go-cpa/internal/catalog"
+	"opencode-go-cpa/internal/config"
 )
 
 const (

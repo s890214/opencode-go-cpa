@@ -11,10 +11,10 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/adapter/shared"
-	"opencode-go-cliproxyapi/internal/catalog"
-	"opencode-go-cliproxyapi/internal/errclass"
-	"opencode-go-cliproxyapi/internal/thinking"
+	"opencode-go-cpa/internal/adapter/shared"
+	"opencode-go-cpa/internal/catalog"
+	"opencode-go-cpa/internal/errclass"
+	"opencode-go-cpa/internal/thinking"
 )
 
 // EndpointPath is the upstream OpenCode Go Chat Completions endpoint.

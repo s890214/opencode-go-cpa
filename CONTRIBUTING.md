@@ -26,7 +26,7 @@ go vet ./...
 
 Build the native shared library for local testing:
 ```powershell
-go build -tags debug -buildmode=c-shared -o plugins/windows/amd64/opencode-go-cliproxyapi.dll .
+go build -tags debug -buildmode=c-shared -o plugins/windows/amd64/opencode-go-cpa.dll .
 ```
 
 ---

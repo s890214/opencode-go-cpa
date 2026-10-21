@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"opencode-go-cliproxyapi/internal/adapter/shared"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"opencode-go-cpa/internal/adapter/shared"
+	"opencode-go-cpa/internal/errclass"
 )
 
 // ---- upstream Anthropic Messages response shapes (decode-only) ----

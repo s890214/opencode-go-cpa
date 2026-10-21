@@ -20,13 +20,13 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/adapter/chatcompletions"
-	"opencode-go-cliproxyapi/internal/adapter/messages"
-	"opencode-go-cliproxyapi/internal/adapter/responses"
-	"opencode-go-cliproxyapi/internal/adapter/shared"
-	"opencode-go-cliproxyapi/internal/catalog"
-	"opencode-go-cliproxyapi/internal/config"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"opencode-go-cpa/internal/adapter/chatcompletions"
+	"opencode-go-cpa/internal/adapter/messages"
+	"opencode-go-cpa/internal/adapter/responses"
+	"opencode-go-cpa/internal/adapter/shared"
+	"opencode-go-cpa/internal/catalog"
+	"opencode-go-cpa/internal/config"
+	"opencode-go-cpa/internal/errclass"
 )
 
 // executorRequest mirrors rpcExecutorRequest: the SDK embeds
@@ -75,7 +75,35 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 			StatusCode: http.StatusNotFound,
 		})
 	}
+	// Pass-through preference: when the upstream model speaks the client's
+	// protocol natively (protocol-preference), send it there instead of
+	// translating to the model's default route. This keeps Responses-only
+	// features (web_search, custom tools) intact for Responses clients.
+	if sourceRoute, ok := routeForSourceFormat(req.SourceFormat); ok {
+		for _, supported := range rec.SupportedProtocols {
+			if supported == sourceRoute {
+				rec.Protocol = sourceRoute
+				// The endpoint must follow the chosen protocol; otherwise a
+				// Responses body would be sent to the default chat path.
+				rec.EndpointPath = sourceRoute.EndpointPath()
+				break
+			}
+		}
+	}
 	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *shared.NewResponseTools()}, nil
+}
+
+// routeForSourceFormat maps the inbound client protocol to an upstream route.
+func routeForSourceFormat(format string) (catalog.Route, bool) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "openai":
+		return catalog.RouteChatCompletions, true
+	case "openai-response":
+		return catalog.RouteResponses, true
+	case "claude":
+		return catalog.RouteMessages, true
+	}
+	return "", false
 }
 
 // handleExecute implements executor.execute (non-stream). Stream-flagged

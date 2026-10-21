@@ -45,29 +45,29 @@ CI handles release builds.
 
 ### Windows (AMD64)
 ```powershell
-go build -tags debug -buildmode=c-shared -o plugins/windows/amd64/opencode-go-cliproxyapi.dll .
+go build -tags debug -buildmode=c-shared -o plugins/windows/amd64/opencode-go-cpa.dll .
 ```
 
 ### Linux (AMD64)
 ```bash
-go build -tags debug -buildmode=c-shared -o plugins/linux/amd64/opencode-go-cliproxyapi.so .
+go build -tags debug -buildmode=c-shared -o plugins/linux/amd64/opencode-go-cpa.so .
 ```
 
 ### macOS (ARM64)
 ```bash
-go build -tags debug -buildmode=c-shared -o plugins/darwin/arm64/opencode-go-cliproxyapi.dylib .
+go build -tags debug -buildmode=c-shared -o plugins/darwin/arm64/opencode-go-cpa.dylib .
 ```
 
 Place the compiled binary into your CLIProxyAPI plugin directory (e.g. `<cliproxyapi_root>/plugins/<os>/<arch>/`).
 
 ## Configuration
 
-Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.opencode-go-cliproxyapi`:
+Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.opencode-go-cpa`:
 
 ```yaml
 plugins:
   configs:
-    opencode-go-cliproxyapi:
+    opencode-go-cpa:
       # Upstream base URL (default: "https://opencode.ai/zen/go/v1")
       base-url: "https://opencode.ai/zen/go/v1"
 

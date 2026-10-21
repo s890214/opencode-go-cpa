@@ -10,7 +10,7 @@ package messages
 import (
 	"net/http"
 
-	"opencode-go-cliproxyapi/internal/catalog"
+	"opencode-go-cpa/internal/catalog"
 )
 
 // EndpointPath is the upstream endpoint path for the Messages route (FR-004).

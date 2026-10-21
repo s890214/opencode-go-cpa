@@ -15,9 +15,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/adapter/shared"
-	"opencode-go-cliproxyapi/internal/catalog"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"opencode-go-cpa/internal/adapter/shared"
+	"opencode-go-cpa/internal/catalog"
+	"opencode-go-cpa/internal/errclass"
 )
 
 const (

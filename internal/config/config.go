@@ -56,6 +56,10 @@ type Config struct {
 	Catalog          Catalog
 	Protocols        Protocols
 	RouteOverrides   map[string]RouteOverride
+	// ProtocolPreference lists upstream protocols a model can speak natively.
+	// When a client requests one of them, the request is passed through
+	// instead of translated to the model's default route.
+	ProtocolPreference map[string][]string
 	AllowHTTP        bool
 	RequestTimeout   time.Duration
 	MaxResponseBytes int64
@@ -72,6 +76,7 @@ type rawConfig struct {
 	Catalog          rawCatalog               `yaml:"catalog"`
 	Protocols        rawProtocols             `yaml:"protocols"`
 	RouteOverrides   map[string]RouteOverride `yaml:"route-overrides"`
+	ProtocolPreference map[string][]string   `yaml:"protocol-preference"`
 	AllowHTTP        bool                     `yaml:"allow-http"`
 	RequestTimeout   *string                  `yaml:"request-timeout"`
 	MaxResponseBytes *int64                   `yaml:"max-response-bytes"`
@@ -146,6 +151,7 @@ func Load(yamlBytes []byte) (Config, error) {
 			Responses:       orDefault(raw.Protocols.Responses, true),
 		},
 		RouteOverrides:   raw.RouteOverrides,
+		ProtocolPreference: raw.ProtocolPreference,
 		AllowHTTP:        raw.AllowHTTP,
 		RequestTimeout:   requestTimeout,
 		MaxResponseBytes: orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
@@ -198,6 +204,16 @@ func (c Config) validate() error {
 	}
 	if c.MaxResponseBytes <= 0 {
 		return fmt.Errorf("max-response-bytes: must be positive")
+	}
+	for name, protocols := range c.ProtocolPreference {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("protocol-preference: model id must not be empty")
+		}
+		for _, protocol := range protocols {
+			if !validProtocols[protocol] {
+				return fmt.Errorf("protocol-preference[%s]: unsupported protocol %q", name, protocol)
+			}
+		}
 	}
 	for name, o := range c.RouteOverrides {
 		if !validProtocols[o.Protocol] {

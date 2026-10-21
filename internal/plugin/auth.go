@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"opencode-go-cliproxyapi/internal/config"
+	"opencode-go-cpa/internal/config"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"

@@ -6,7 +6,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"net/http"
-	"opencode-go-cliproxyapi/internal/config"
+	"opencode-go-cpa/internal/config"
 	"os"
 	"path/filepath"
 	"strings"

@@ -13,7 +13,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/errclass"
+	"opencode-go-cpa/internal/errclass"
 )
 
 // CanonicalLevels is the ordered effort space, weakest to strongest.

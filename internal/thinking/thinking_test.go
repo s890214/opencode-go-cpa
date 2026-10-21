@@ -5,7 +5,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/errclass"
+	"opencode-go-cpa/internal/errclass"
 )
 
 func TestCanonicalLevelsOrder(t *testing.T) {

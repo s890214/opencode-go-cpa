@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"opencode-go-cliproxyapi/internal/errclass"
+	"opencode-go-cpa/internal/errclass"
 )
 
 // responseToolIdentity is the original (name, namespace) pair behind one
@@ -111,7 +111,12 @@ func qualifiedToolName(name, namespace string) string {
 // parameters schema. It reports false when the tool must be dropped.
 func normalizeCustomTool(tool *RespTool, target string) bool {
 	if tool.Type == "custom" && tool.Name == "apply_patch" {
-		return false
+		// Native Responses upstreams accept custom tools (verified: the
+		// OpenCode Go responses endpoint returns custom_tool_call). Only
+		// translated routes need to drop apply_patch, like web_search.
+		if target != "/v1/responses" {
+			return false
+		}
 	}
 	if tool.Type == "tool_search" || tool.Type == "image_generation" {
 		return false
