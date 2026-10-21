@@ -40,6 +40,15 @@ const (
 
 // EndpointPath returns the upstream endpoint path for the route (FR-004).
 // routeEndpoints maps each route to its upstream endpoint path.
+// routeEndpoints is the last-resort default of each protocol's path, used
+// only when neither `models.*.endpoints` nor `protocol-endpoints` override it.
+// These are the upstream's *generic alias* paths (/go/v1/...), which also
+// serve chat, responses and messages. Its documented layout is different —
+// /go/openai/v1/{chat/completions,responses} and /go/anthropic/v1/messages —
+// and that is what a real deployment should pin in `protocol-endpoints`.
+// JoinUpstreamURL also strips a leading "/v1" from the endpoint, so a base of
+// ".../go/v1" plus "/v1/chat/completions" resolves to ".../go/v1/chat/completions"
+// rather than a doubled segment.
 var routeEndpoints = map[Route]string{
 	RouteChatCompletions: "/v1/chat/completions",
 	RouteMessages:        "/v1/messages",
