@@ -261,7 +261,7 @@ func responsesToClaude(body []byte) ([]byte, *errclass.Error) {
 		case "function_call":
 			input, eErr := shared.DecodeArgs(item.Arguments)
 			if eErr != nil {
-				return nil, eErr
+				input = shared.InvalidToolInput(item.Arguments)
 			}
 			blocks = append(blocks, map[string]any{
 				"type": "tool_use", "id": item.CallID, "name": item.Name, "input": input,

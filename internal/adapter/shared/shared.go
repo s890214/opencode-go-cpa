@@ -216,6 +216,16 @@ func WrapCustomToolInput(input string) string {
 	return string(b)
 }
 
+// InvalidToolInput keeps a malformed tool-call argument payload visible
+// instead of failing the whole turn. A historical call with broken JSON is a
+// client-side artefact; dropping the request punishes the user for it, while
+// dropping the payload loses the only copy of what the model produced.
+// Anthropic's tool_use.input must be an object, so the raw text rides inside
+// {"input": ...} and the model still sees exactly what the client sent.
+func InvalidToolInput(raw string) map[string]any {
+	return map[string]any{"input": raw}
+}
+
 // ToolChoice kinds returned by DecodeToolChoice: "absent" (field missing
 // or null), "auto", "any" (any/required), "none", "named" (forced single
 // tool, name carries the tool name).

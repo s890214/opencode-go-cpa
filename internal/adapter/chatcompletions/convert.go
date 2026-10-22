@@ -133,14 +133,16 @@ func ccContentToBlocks(raw json.RawMessage) ([]claudeBlock, *errclass.Error) {
 	return shared.ClaudeBlocksFromOpenAI(raw, EndpointPath)
 }
 
-// claudeToolUseBlocks converts tool calls into tool_use blocks; malformed
-// arguments are a translation failure, never dropped (FR-006).
+// claudeToolUseBlocks converts tool calls into tool_use blocks. Malformed
+// arguments degrade to {"input": <raw>} instead of failing the turn: the
+// client already produced that payload, and Anthropic only requires input to
+// be an object.
 func claudeToolUseBlocks(calls []shared.CCToolCall) ([]claudeBlock, *errclass.Error) {
 	var blocks []claudeBlock
 	for _, tc := range calls {
 		input, eErr := shared.DecodeArgs(tc.Function.Arguments)
 		if eErr != nil {
-			return nil, eErr
+			input = shared.InvalidToolInput(tc.Function.Arguments)
 		}
 		blocks = append(blocks, claudeBlock{
 			"type": "tool_use", "id": tc.ID, "name": tc.Function.Name, "input": input,

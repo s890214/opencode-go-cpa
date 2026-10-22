@@ -202,6 +202,19 @@ func TestConvertNonStreamClaudeVariants(t *testing.T) {
 	})
 }
 
+func TestConvertClaudeDegradesMalformedToolArguments(t *testing.T) {
+	// The client produced the payload; a broken JSON string must not fail the
+	// turn. Anthropic only requires tool_use.input to be an object.
+	body := `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"f","arguments":"{bad"}}]}}]}`
+	out, eErr := ConvertNonStreamResponse("claude", 200, []byte(body))
+	if eErr != nil {
+		t.Fatalf("malformed args should degrade: %v", eErr)
+	}
+	if !strings.Contains(string(out), `"input":{"input":"{bad"}`) {
+		t.Fatalf("raw payload not preserved: %s", out)
+	}
+}
+
 func TestConvertNonStreamClaudeErrors(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -210,7 +223,6 @@ func TestConvertNonStreamClaudeErrors(t *testing.T) {
 	}{
 		{"malformed json", `{`, errclass.ClassTranslation},
 		{"no choices", `{"choices":[]}`, errclass.ClassTranslation},
-		{"malformed args", `{"choices":[{"message":{"tool_calls":[{"function":{"arguments":"{bad"}}]}}]}`, errclass.ClassTranslation},
 		{"malformed content object", `{"choices":[{"message":{"content":{"bad":1}}}]}`, errclass.ClassTranslation},
 		{"image missing url", `{"choices":[{"message":{"content":[{"type":"image_url"}]}}]}`, errclass.ClassTranslation},
 		{"malformed data URL", `{"choices":[{"message":{"content":[{"type":"image_url","image_url":{"url":"data:x"}}]}}]}`, errclass.ClassTranslation},

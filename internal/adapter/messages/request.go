@@ -418,8 +418,8 @@ func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.Thinki
 				input, eErr := shared.DecodeArgs(tc.Function.Arguments)
 				if eErr != nil {
 					// A malformed historical call must not fail the whole
-					// turn; the tool result still carries the real payload.
-					input = map[string]any{}
+					// turn; keep the raw payload visible instead of blanking it.
+					input = shared.InvalidToolInput(tc.Function.Arguments)
 				}
 				b.add("assistant", "assistant", anthropicBlock{
 					"type": "tool_use", "id": tc.ID, "name": tc.Function.Name, "input": input,
@@ -546,8 +546,9 @@ func fromResponses(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupp
 			hasToolHistory = true
 			input, eErr := shared.DecodeArgs(item.Arguments)
 			if eErr != nil {
-				// Historical malformed arguments must not fail the turn.
-				input = map[string]any{}
+				// Historical malformed arguments must not fail the turn;
+				// keep the raw payload visible instead of blanking it.
+				input = shared.InvalidToolInput(item.Arguments)
 			}
 			name := item.Name
 			if item.Type == "tool_search_call" && name == "" {

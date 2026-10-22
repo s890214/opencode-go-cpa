@@ -347,15 +347,16 @@ func TestChatCompletionsErrors(t *testing.T) {
 			t.Errorf("%s: want ClassTranslation, got %+v", c.name, eErr)
 		}
 	}
-	// Historical malformed tool arguments must not fail the turn: they
-	// degrade to an empty object so the conversation still continues.
+	// Historical malformed tool arguments must not fail the turn: the raw
+	// payload is preserved under input so nothing the client produced is lost.
 	m, eErr := chatReq(t, `{"messages":[{"role":"user","content":"go"},{"role":"assistant","tool_calls":[{"id":"c","function":{"name":"f","arguments":"{oops"}}]},{"role":"tool","tool_call_id":"c","content":"ok"}]}`)
 	if eErr != nil {
 		t.Fatalf("malformed history should degrade, got %+v", eErr)
 	}
 	block := m["messages"].([]any)[1].(map[string]any)["content"].([]any)[0].(map[string]any)
-	if block["type"] != "tool_use" || len(block["input"].(map[string]any)) != 0 {
-		t.Fatalf("malformed args not normalized: %v", block)
+	input, ok := block["input"].(map[string]any)
+	if block["type"] != "tool_use" || !ok || input["input"] != "{oops" {
+		t.Fatalf("malformed args not preserved: %v", block)
 	}
 	// Unknown roles and part types are unsupported_protocol_or_parameter
 	// (FR-009 kernel), not translation failures.
@@ -595,15 +596,16 @@ func TestResponsesErrors(t *testing.T) {
 			t.Errorf("%s: want ClassTranslation, got %+v", c.name, eErr)
 		}
 	}
-	// A malformed historical function_call degrades to empty input instead
+	// A malformed historical function_call preserves its raw payload instead
 	// of failing the whole conversion (tool-loop continuity).
 	badArgs, eErr := respReq(t, `{"input":[{"type":"message","role":"user","content":"go"},{"type":"function_call","call_id":"c","name":"f","arguments":"nope"},{"type":"function_call_output","call_id":"c","output":"ok"}]}`)
 	if eErr != nil {
 		t.Fatalf("bad function args should degrade: %+v", eErr)
 	}
 	block := badArgs["messages"].([]any)[1].(map[string]any)["content"].([]any)[0].(map[string]any)
-	if block["type"] != "tool_use" || len(block["input"].(map[string]any)) != 0 {
-		t.Fatalf("bad args not normalized: %v", block)
+	input, ok := block["input"].(map[string]any)
+	if block["type"] != "tool_use" || !ok || input["input"] != "nope" {
+		t.Fatalf("bad args not preserved: %v", block)
 	}
 	// Unknown roles, part types, and input item types are
 	// unsupported_protocol_or_parameter (FR-009 kernel), not translation failures.

@@ -1,3 +1,23 @@
+## v0.5.3 — malformed tool arguments degrade instead of failing the turn
+
+### Protocol
+
+- A historical tool call whose `arguments` are not valid JSON no longer fails
+  the whole request. The raw payload is preserved as `{"input": <raw>}` —
+  Anthropic requires `tool_use.input` to be an object, and blanking it to `{}`
+  loses the model's only output. The Chat→Messages and Responses→Messages
+  conversion legs used to return a translation error instead.
+- Verified existing guards are now pinned by tests: `CleanSchema` (root object
+  fill, `format:uri` drop, array-item recursion, empty schema), the Anthropic
+  history sanitizer (leading user, empty messages, incomplete/complete tool
+  turns, unsigned thinking on tool turns), and `strict:false` on Responses
+  function tools built from Chat or Claude sources.
+
+### Tests
+
+- Degradation assertions on all four surfaces.
+- Schema and sanitizer coverage enumerated above.
+
 ## v0.5.2 — tool-result media in the Chat bridge
 
 ### Protocol

@@ -279,11 +279,15 @@ func TestConvertResponsesToClaudeFunctionCall(t *testing.T) {
 		t.Fatalf("tool_use not mapped: %s", out)
 	}
 
-	// Malformed arguments are a translation failure, never dropped.
+	// Malformed arguments degrade to {"input": <raw>} instead of failing the
+	// turn: the client produced that payload and Anthropic only needs an object.
 	bad := strings.Replace(respFunctionCall, `"arguments":"{\"city\":\"sf\"}"`, `"arguments":"nope"`, 1)
-	_, eErr = ConvertNonStreamResponse("claude", 200, []byte(bad))
-	if eErr == nil || !strings.Contains(eErr.Message, "malformed tool call arguments JSON") {
-		t.Fatalf("malformed args err = %v", eErr)
+	out, eErr = ConvertNonStreamResponse("claude", 200, []byte(bad))
+	if eErr != nil {
+		t.Fatalf("malformed args should degrade: %v", eErr)
+	}
+	if !strings.Contains(string(out), `"input":{"input":"nope"}`) {
+		t.Fatalf("raw payload not preserved: %s", out)
 	}
 }
 
