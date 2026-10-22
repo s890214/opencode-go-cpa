@@ -49,15 +49,18 @@ func BuildRequest(upstreamModel, sourceFormat string, sourceBody []byte, ts *plu
 	}
 }
 
+// toolCallPlaceholder is the non-empty placeholder CC Switch injects into a
+// tool-call assistant message whose real thinking is unknown. Thinking-mode
+// upstreams (DeepSeek, Kimi) require a non-empty reasoning_content on every
+// assistant message that carries tool_calls; an empty string is not enough.
+const toolCallPlaceholder = "tool call"
+
 // toolCallReasoning returns the reasoning that belongs to one tool call:
 // the text carried by the inbound request when it is still attached,
 // otherwise whatever the cache captured from the upstream answer that
-// produced the call, otherwise "". The empty string is a deliberate
-// placeholder — the upstream accepts reasoning_content:"" and only needs
-// the field to be present, so an unknown turn still round-trips instead
-// of failing with 400.
+// produced the call, otherwise the non-empty placeholder.
 func toolCallReasoning(store *shared.ResponseTools, callID, pending string, hasPending bool) *string {
-	text := ""
+	text := toolCallPlaceholder
 	switch {
 	case hasPending:
 		text = pending
@@ -67,6 +70,122 @@ func toolCallReasoning(store *shared.ResponseTools, callID, pending string, hasP
 		}
 	}
 	return &text
+}
+
+// isDeepSeekChatModel mirrors CC Switch's exact-ID check. History repairs that
+// rewrite assistant turns are limited to DeepSeek: other providers read the
+// same history differently and their prompt caches would churn.
+func isDeepSeekChatModel(model string) bool {
+	name := model
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	return name == "deepseek" || strings.HasPrefix(name, "deepseek-")
+}
+
+// ensureToolCallReasoning backfills a non-empty reasoning_content on every
+// assistant message that carries tool_calls (CC Switch parity). An empty or
+// null value is rejected by thinking-mode upstreams just like a missing one.
+func ensureToolCallReasoning(msgs []ccMessage) {
+	for i := range msgs {
+		m := &msgs[i]
+		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+			continue
+		}
+		if m.ReasoningContent == nil || strings.TrimSpace(*m.ReasoningContent) == "" {
+			text := toolCallPlaceholder
+			m.ReasoningContent = &text
+		}
+	}
+}
+
+// coalesceReplayedToolTurn merges assistant messages that Responses replays
+// between a tool-call turn and its results back into the tool-call message
+// (CC Switch parity). Chat requires the whole turn to be one assistant
+// message; a text-only assistant in the middle of unanswered calls is
+// rejected by strict thinking-mode upstreams.
+func coalesceReplayedToolTurn(msgs []ccMessage) []ccMessage {
+	out := make([]ccMessage, 0, len(msgs))
+	open := -1
+	pending := make(map[string]struct{})
+	for _, m := range msgs {
+		switch m.Role {
+		case "assistant":
+			for _, tc := range m.ToolCalls {
+				if tc.ID != "" {
+					pending[tc.ID] = struct{}{}
+				}
+			}
+			if open >= 0 {
+				target := &out[open]
+				target.Content = mergeAssistantContent(target.Content, m.Content)
+				if m.ReasoningContent != nil {
+					text := strings.TrimSpace(*m.ReasoningContent)
+					switch {
+					case text == "":
+					case target.ReasoningContent == nil || strings.TrimSpace(*target.ReasoningContent) == "":
+						merged := text
+						target.ReasoningContent = &merged
+					case !strings.Contains(*target.ReasoningContent, text):
+						merged := *target.ReasoningContent + "\n\n" + text
+						target.ReasoningContent = &merged
+					}
+				}
+				target.ToolCalls = append(target.ToolCalls, m.ToolCalls...)
+				continue
+			}
+			if len(pending) > 0 {
+				open = len(out)
+			}
+		case "tool":
+			if m.ToolCallID != "" {
+				delete(pending, m.ToolCallID)
+			}
+			if len(pending) == 0 {
+				open = -1
+			}
+		default:
+			open = -1
+			pending = make(map[string]struct{})
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// mergeAssistantContent folds one assistant turn's text into another without
+// dropping either side (string concatenation or content-part append).
+func mergeAssistantContent(target, addition any) any {
+	if contentEmpty(addition) {
+		return target
+	}
+	if contentEmpty(target) {
+		return addition
+	}
+	if ts, ok := target.(string); ok {
+		if as, ok := addition.(string); ok {
+			return ts + "\n" + as
+		}
+	}
+	parts, _ := target.([]ccContentPart)
+	extra, _ := addition.([]ccContentPart)
+	merged := make([]ccContentPart, 0, len(parts)+len(extra))
+	merged = append(merged, parts...)
+	merged = append(merged, extra...)
+	return merged
+}
+
+func contentEmpty(content any) bool {
+	switch v := content.(type) {
+	case nil:
+		return true
+	case string:
+		return v == ""
+	case []ccContentPart:
+		return len(v) == 0
+	}
+	return false
 }
 
 // firstToolCallID extracts the id of the first tool call in a raw
@@ -557,11 +676,14 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			tc.Function.Name = item.Name
 			tc.Function.Arguments = args
 			reasoning := toolCallReasoning(tools, item.CallID, pendingReasoning, hasPendingReasoning)
-			// Merge consecutive function_call items into one
-			// assistant message so multi-call turns round-trip.
+			// Merge into the last assistant message: both consecutive
+			// function_call items and the commentary text Responses
+			// replays as a separate message belong to the same turn.
+			// Chat models treat a standalone text-only assistant turn as
+			// complete and stop before the calls.
 			if n := len(out.Messages); n > 0 {
 				last := &out.Messages[n-1]
-				if last.Role == "assistant" && last.Content == nil {
+				if last.Role == "assistant" {
 					last.ToolCalls = append(last.ToolCalls, tc)
 					if last.ReasoningContent == nil {
 						last.ReasoningContent = reasoning
@@ -585,7 +707,7 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			reasoning := toolCallReasoning(tools, item.CallID, pendingReasoning, hasPendingReasoning)
 			if n := len(out.Messages); n > 0 {
 				last := &out.Messages[n-1]
-				if last.Role == "assistant" && last.Content == nil {
+				if last.Role == "assistant" {
 					last.ToolCalls = append(last.ToolCalls, tc)
 					if last.ReasoningContent == nil {
 						last.ReasoningContent = reasoning
@@ -644,6 +766,15 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 	}
 
 	flushToolMedia()
+
+	// CC Switch parity: DeepSeek validates tool-result adjacency strictly,
+	// so collapse assistant messages replayed inside an unanswered tool
+	// turn; every thinking-mode upstream also needs a non-empty
+	// reasoning_content on the messages that carry tool_calls.
+	if isDeepSeekChatModel(upstreamModel) {
+		out.Messages = coalesceReplayedToolTurn(out.Messages)
+	}
+	ensureToolCallReasoning(out.Messages)
 
 	if len(systemTexts) > 0 {
 		out.Messages = append([]ccMessage{{Role: "system", Content: strings.Join(systemTexts, "\n\n")}}, out.Messages...)

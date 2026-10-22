@@ -1,3 +1,29 @@
+## v0.5.5 — one assistant turn stays one Chat message
+
+### Fixes
+
+- A Responses turn replayed as `reasoning` + `message` + several
+  `function_call` items is now emitted as a single Chat assistant message.
+  Previously the commentary text became a standalone text-only assistant
+  turn and only the tool-call message carried `reasoning_content`; DeepSeek
+  thinking mode rejects that shape with
+  `The reasoning_content in the thinking mode must be passed back to the API`
+  (Codex Desktop hit this on every tool turn).
+- Every assistant message with `tool_calls` now carries a non-empty
+  `reasoning_content`; unknown thinking falls back to the CC Switch
+  placeholder `tool call` instead of an empty string.
+- DeepSeek targets additionally coalesce assistant messages replayed between
+  an open tool call and its result back into the tool-call message (CC Switch
+  parity). Other providers keep their history untouched so caches stay
+  stable.
+
+### Tests
+
+- Codex turn shape (commentary + parallel calls) must yield one assistant
+  message carrying content, calls and reasoning.
+- Non-empty placeholder contract.
+- DeepSeek-only coalescing; a non-DeepSeek model keeps the split history.
+
 ## v0.5.4 — catalog endpoint is a path, like quota
 
 ### Configuration

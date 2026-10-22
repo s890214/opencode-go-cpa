@@ -55,8 +55,8 @@ func TestResponsesToolCallGetsReasoningContent(t *testing.T) {
 	if msg.ReasoningContent == nil {
 		t.Fatalf("reasoning_content missing: %+v", msg)
 	}
-	if *msg.ReasoningContent != "" {
-		t.Fatalf("unknown call should send an empty placeholder, got %q", *msg.ReasoningContent)
+	if *msg.ReasoningContent != toolCallPlaceholder {
+		t.Fatalf("unknown call should send the non-empty placeholder, got %q", *msg.ReasoningContent)
 	}
 }
 

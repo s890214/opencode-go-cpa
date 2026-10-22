@@ -536,8 +536,8 @@ func TestBuildRequestResponses(t *testing.T) {
 		t.Fatalf("envelope fields wrong: %v", m)
 	}
 	msgs := m["messages"].([]any)
-	if len(msgs) != 5 {
-		t.Fatalf("want 5 messages, got %d: %v", len(msgs), msgs)
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d: %v", len(msgs), msgs)
 	}
 	if m0 := msgs[0].(map[string]any); m0["role"] != "system" || m0["content"] != "be nice\n\ndev" {
 		t.Fatalf("collapsed system message wrong: %v", m0)
@@ -546,12 +546,12 @@ func TestBuildRequestResponses(t *testing.T) {
 	if len(user) != 2 || user[1].(map[string]any)["type"] != "image_url" {
 		t.Fatalf("user parts wrong: %v", user)
 	}
-	if msgs[2].(map[string]any)["content"] != "a" {
-		t.Fatalf("assistant item wrong: %v", msgs[2])
+	merged := msgs[2].(map[string]any)
+	if merged["role"] != "assistant" || merged["content"] != "a" {
+		t.Fatalf("assistant commentary must merge into the tool turn: %v", merged)
 	}
-	merged := msgs[3].(map[string]any)
 	calls := merged["tool_calls"].([]any)
-	if merged["role"] != "assistant" || len(calls) != 2 {
+	if len(calls) != 2 {
 		t.Fatalf("consecutive function_calls not merged: %v", merged)
 	}
 	c1 := calls[0].(map[string]any)
@@ -561,7 +561,7 @@ func TestBuildRequestResponses(t *testing.T) {
 	if calls[1].(map[string]any)["function"].(map[string]any)["arguments"] != "{}" {
 		t.Fatalf("empty arguments not defaulted: %v", calls[1])
 	}
-	outMsg := msgs[4].(map[string]any)
+	outMsg := msgs[3].(map[string]any)
 	if outMsg["role"] != "tool" || outMsg["tool_call_id"] != "c1" || outMsg["content"] != "ok" {
 		t.Fatalf("function_call_output wrong: %v", outMsg)
 	}
