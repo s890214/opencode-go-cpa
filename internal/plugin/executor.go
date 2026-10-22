@@ -42,10 +42,11 @@ type executorRequest struct {
 // resolvedExecution carries everything both execution paths need after
 // model/key resolution succeeded.
 type resolvedExecution struct {
-	cfg   config.Config
-	rec   catalog.ModelRecord
-	key   string
-	tools shared.ResponseTools
+	cfg         config.Config
+	rec         catalog.ModelRecord
+	key         string
+	tools       shared.ResponseTools
+	passThrough bool
 }
 
 // resolveExecution resolves the requested model against the snapshot and
@@ -81,10 +82,12 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 	// features (web_search, custom tools) intact for Responses clients.
 	// The protocol switches gate this path exactly like the catalog build,
 	// so a disabled protocol cannot re-enter through a preference entry.
+	var passThrough bool
 	if sourceRoute, ok := routeForSourceFormat(req.SourceFormat); ok && cfg.Protocols.Enabled(string(sourceRoute)) {
 		for _, supported := range rec.SupportedProtocols {
 			if supported == sourceRoute {
 				rec.Protocol = sourceRoute
+				passThrough = true
 				// The endpoint must follow the protocol actually used, or a
 				// Responses body gets posted to the Chat Completions path.
 				// EndpointPaths already resolved every supported protocol
@@ -110,7 +113,36 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 	}
 	rt := shared.NewResponseTools()
 	rt.SetReasoningShape(string(rec.ReasoningShape))
-	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *rt}, nil
+	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *rt, passThrough: passThrough}, nil
+}
+
+// upstreamMetaHeaders reports the upstream leg of this execution to the host
+// as internal response headers. CPA consumes and strips them before the
+// downstream client ever sees the response.
+func upstreamMetaHeaders(res *resolvedExecution) http.Header {
+	headers := http.Header{}
+	if res == nil {
+		return headers
+	}
+	if protocol := strings.TrimSpace(string(res.rec.Protocol)); protocol != "" {
+		headers.Set("X-Cpa-Upstream-Protocol", protocol)
+	}
+	if res.passThrough {
+		headers.Set("X-Cpa-Upstream-Passthrough", "1")
+	}
+	return headers
+}
+
+// withUpstreamMeta copies headers and adds the upstream metadata headers.
+func withUpstreamMeta(headers http.Header, res *resolvedExecution) http.Header {
+	out := make(http.Header, len(headers)+2)
+	for key, values := range headers {
+		out[key] = append([]string(nil), values...)
+	}
+	for key, values := range upstreamMetaHeaders(res) {
+		out[key] = values
+	}
+	return out
 }
 
 // routeForSourceFormat maps the inbound client protocol to an upstream route.
@@ -183,7 +215,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
-	return okEnvelope(pluginapi.ExecutorResponse{Payload: converted, Headers: resp.Headers}), nil
+	return okEnvelope(pluginapi.ExecutorResponse{Payload: converted, Headers: withUpstreamMeta(resp.Headers, res)}), nil
 }
 
 func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat string, sourceBody []byte, ts *pluginapi.ThinkingSupport, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
@@ -461,7 +493,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		}
 		m.pumpStream(downID, id, res, req.SourceFormat)
 	}()
-	return okEnvelope(struct{}{}), nil
+	return okEnvelope(map[string]any{"headers": upstreamMetaHeaders(res)}), nil
 }
 
 func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string) {

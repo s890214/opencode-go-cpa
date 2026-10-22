@@ -583,6 +583,23 @@ func TestExecuteStreamRoutedFromBothMethods(t *testing.T) {
 	})
 }
 
+// streamEnvelopeProtocol returns the upstream protocol the plugin reported on
+// an execute_stream envelope, failing when it is absent.
+func streamEnvelopeProtocol(t *testing.T, raw []byte) string {
+	t.Helper()
+	var payload struct {
+		Headers map[string][]string `json:"headers"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode stream envelope: %v (%s)", err, raw)
+	}
+	values := payload.Headers["X-Cpa-Upstream-Protocol"]
+	if len(values) == 0 || values[0] == "" {
+		t.Fatalf("stream envelope missing upstream protocol: %s", raw)
+	}
+	return values[0]
+}
+
 func TestExecuteStreamHappyPathClaudeSource(t *testing.T) {
 	m, f := newStreamManager(t, streamScript{
 		upstreamID: "up-1",
@@ -598,7 +615,7 @@ func TestExecuteStreamHappyPathClaudeSource(t *testing.T) {
 		t.Fatalf("execute_stream: %v", err)
 	}
 	env := decodeEnv(t, resp)
-	if !env.OK || string(env.Result) != "{}" {
+	if !env.OK || streamEnvelopeProtocol(t, env.Result) == "" {
 		t.Fatalf("envelope = %s", resp)
 	}
 	streamWire := decodePayload(t, f.callsOf(pluginabi.MethodHostHTTPDoStream)[0])
@@ -657,7 +674,7 @@ func TestExecuteStreamCleanCloseWithoutTerminalFrame(t *testing.T) {
 		t.Fatalf("execute_stream: %v", err)
 	}
 	env := decodeEnv(t, resp)
-	if !env.OK || string(env.Result) != "{}" {
+	if !env.OK || streamEnvelopeProtocol(t, env.Result) == "" {
 		t.Fatalf("envelope = %s", resp)
 	}
 	m.bridge.WaitForInFlight(5 * time.Second)
@@ -915,7 +932,7 @@ func TestExecuteStreamResponsesRouteNative(t *testing.T) {
 		t.Fatalf("execute_stream: %v", err)
 	}
 	env := decodeEnv(t, resp)
-	if !env.OK || string(env.Result) != "{}" {
+	if !env.OK || streamEnvelopeProtocol(t, env.Result) == "" {
 		t.Fatalf("envelope = %s", resp)
 	}
 	streamWire := decodePayload(t, f.callsOf(pluginabi.MethodHostHTTPDoStream)[0])
@@ -983,7 +1000,7 @@ func TestExecuteStreamPartialLineDroppedOnCleanClose(t *testing.T) {
 		t.Fatalf("execute_stream: %v", err)
 	}
 	env := decodeEnv(t, resp)
-	if !env.OK || string(env.Result) != "{}" {
+	if !env.OK || streamEnvelopeProtocol(t, env.Result) == "" {
 		t.Fatalf("envelope = %s", resp)
 	}
 	m.bridge.WaitForInFlight(5 * time.Second)

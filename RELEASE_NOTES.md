@@ -1,3 +1,14 @@
+## v0.5.6 — report the upstream leg to the host
+
+### Features
+
+- Every executor result now carries two internal headers for the host:
+  `X-Cpa-Upstream-Protocol` (chat-completions / responses / messages) and
+  `X-Cpa-Upstream-Passthrough: 1` when the client protocol was forwarded
+  without translation. CPA stores them on the usage event and strips them
+  before the response reaches the client, so Keeper can show whether a
+  request was passed through or translated.
+
 ## v0.5.5 — one assistant turn stays one Chat message
 
 ### Fixes
