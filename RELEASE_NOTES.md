@@ -1,3 +1,24 @@
+## v0.5.4 — catalog endpoint is a path, like quota
+
+### Configuration
+
+- `catalog-url` (a full URL) is replaced by `catalog-path`, a path relative to
+  `base-url` with the same shape as `quota-path`: it must start with `/`,
+  defaults to `/v1/models`, and trailing slashes are trimmed. The catalog
+  request is built as `TrimRight(base-url, "/") + catalog-path`, exactly like
+  the quota endpoint.
+- The settings page lists `catalog-path` next to `quota-path`, described the
+  same way.
+- A host still carrying `catalog-url` keeps working when its value was
+  `{base-url}/v1/models`: unknown YAML keys are ignored and the derived default
+  is the same URL. Delete the stale key (or replace it with
+  `catalog-path: /v1/models`) when installing.
+
+### Tests
+
+- Default, explicit override, trailing-slash trim, empty fallback, and
+  rejection of a non-slash-prefixed or full-URL value.
+
 ## v0.5.3 — malformed tool arguments degrade instead of failing the turn
 
 ### Protocol
