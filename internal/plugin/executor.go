@@ -116,33 +116,18 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *rt, passThrough: passThrough}, nil
 }
 
-// upstreamMetaHeaders reports the upstream leg of this execution to the host
-// as internal response headers. CPA consumes and strips them before the
-// downstream client ever sees the response.
-func upstreamMetaHeaders(res *resolvedExecution) http.Header {
-	headers := http.Header{}
+// upstreamMetadata reports the upstream leg of this execution to the host
+// through the executor response metadata bag (never in client-visible headers).
+func upstreamMetadata(res *resolvedExecution) map[string]any {
+	metadata := map[string]any{}
 	if res == nil {
-		return headers
+		return metadata
 	}
 	if protocol := strings.TrimSpace(string(res.rec.Protocol)); protocol != "" {
-		headers.Set("X-Cpa-Upstream-Protocol", protocol)
+		metadata["upstream_protocol"] = protocol
 	}
-	if res.passThrough {
-		headers.Set("X-Cpa-Upstream-Passthrough", "1")
-	}
-	return headers
-}
-
-// withUpstreamMeta copies headers and adds the upstream metadata headers.
-func withUpstreamMeta(headers http.Header, res *resolvedExecution) http.Header {
-	out := make(http.Header, len(headers)+2)
-	for key, values := range headers {
-		out[key] = append([]string(nil), values...)
-	}
-	for key, values := range upstreamMetaHeaders(res) {
-		out[key] = values
-	}
-	return out
+	metadata["upstream_passthrough"] = res.passThrough
+	return metadata
 }
 
 // routeForSourceFormat maps the inbound client protocol to an upstream route.
@@ -215,7 +200,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
-	return okEnvelope(pluginapi.ExecutorResponse{Payload: converted, Headers: withUpstreamMeta(resp.Headers, res)}), nil
+	return okEnvelope(pluginapi.ExecutorResponse{Payload: converted, Headers: resp.Headers, Metadata: upstreamMetadata(res)}), nil
 }
 
 func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat string, sourceBody []byte, ts *pluginapi.ThinkingSupport, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
@@ -493,7 +478,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		}
 		m.pumpStream(downID, id, res, req.SourceFormat)
 	}()
-	return okEnvelope(map[string]any{"headers": upstreamMetaHeaders(res)}), nil
+	return okEnvelope(map[string]any{"metadata": upstreamMetadata(res)}), nil
 }
 
 func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string) {

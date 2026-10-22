@@ -1,3 +1,13 @@
+## v0.5.7 — report the upstream leg through response metadata
+
+### Changes
+
+- Replaces the internal response headers of 0.5.6 with the executor response
+  metadata bag: `metadata.upstream_protocol` (chat-completions / responses /
+  messages) and `metadata.upstream_passthrough`. No client-visible header is
+  touched, and the host reads the values from the same extension point it
+  already uses for non-streaming results.
+
 ## v0.5.6 — report the upstream leg to the host
 
 ### Features

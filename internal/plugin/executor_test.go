@@ -588,16 +588,16 @@ func TestExecuteStreamRoutedFromBothMethods(t *testing.T) {
 func streamEnvelopeProtocol(t *testing.T, raw []byte) string {
 	t.Helper()
 	var payload struct {
-		Headers map[string][]string `json:"headers"`
+		Metadata map[string]any `json:"metadata"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		t.Fatalf("decode stream envelope: %v (%s)", err, raw)
 	}
-	values := payload.Headers["X-Cpa-Upstream-Protocol"]
-	if len(values) == 0 || values[0] == "" {
+	protocol, _ := payload.Metadata["upstream_protocol"].(string)
+	if protocol == "" {
 		t.Fatalf("stream envelope missing upstream protocol: %s", raw)
 	}
-	return values[0]
+	return protocol
 }
 
 func TestExecuteStreamHappyPathClaudeSource(t *testing.T) {
