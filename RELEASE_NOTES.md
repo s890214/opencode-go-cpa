@@ -1,3 +1,22 @@
+## v0.5.2 — tool-result media in the Chat bridge
+
+### Protocol
+
+- `function_call_output` may carry `input_image` / `input_file` / `input_audio`
+  blocks (Codex screenshots, PDF reads). Chat tool messages are text-only, so
+  those blocks are now extracted, replaced by a marker inside the tool text, and
+  re-emitted on a synthetic user message before the next non-tool item. This
+  removes the `unsupported tool content part type "input_image"` rejection that
+  killed any converted Codex turn carrying a screenshot.
+- Parallel tool results stay adjacent and text-only results keep the exact
+  legacy wire shape, so prompt caching is unaffected.
+
+### Tests
+
+- Plan-level coverage for image / file / unknown-part / scalar-text inputs.
+- End-to-end Responses→Chat coverage asserting
+  assistant → tool → user(media) → user(next) ordering.
+
 ## v0.5.1 — protocol hardening across all nine routes
 
 ### Routing

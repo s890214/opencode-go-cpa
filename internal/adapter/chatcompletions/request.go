@@ -6,6 +6,7 @@ package chatcompletions
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -502,7 +503,22 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 	knownCalls := make(map[string]struct{})
 	var pendingReasoning string
 	var hasPendingReasoning bool
+	// Chat tool messages cannot carry media, but Responses tool results may
+	// hold screenshots or files. Extract those blocks and re-emit them on a
+	// synthetic user message before the next non-tool item, keeping parallel
+	// tool results adjacent so tool_calls/tool ordering stays valid.
+	var pendingToolMedia []map[string]any
+	flushToolMedia := func() {
+		if len(pendingToolMedia) == 0 {
+			return
+		}
+		out.Messages = append(out.Messages, ccMessage{Role: "user", Content: pendingToolMedia})
+		pendingToolMedia = nil
+	}
 	for _, item := range items {
+		if item.Type != "function_call_output" && item.Type != "custom_tool_call_output" {
+			flushToolMedia()
+		}
 		switch item.Type {
 		case "message":
 			content, eErr := respContent(item.Content)
@@ -582,9 +598,23 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 				ReasoningContent: reasoning,
 			})
 		case "function_call_output", "custom_tool_call_output":
-			text, eErr := shared.RespOutputText(item.Output, "tool messages carry text only")
+			text := ""
+			plan, eErr := shared.PlanChatToolOutput(item.Output, "tool messages carry text only")
 			if eErr != nil {
 				return nil, eErr
+			}
+			if plan != nil {
+				text = plan.Text
+				if len(plan.Media) > 0 {
+					pendingToolMedia = append(pendingToolMedia,
+						map[string]any{"type": "text", "text": fmt.Sprintf("[media output of tool call %s]", item.CallID)})
+					pendingToolMedia = append(pendingToolMedia, plan.Media...)
+				}
+			} else {
+				text, eErr = shared.RespOutputText(item.Output, "tool messages carry text only")
+				if eErr != nil {
+					return nil, eErr
+				}
 			}
 			if _, ok := knownCalls[item.CallID]; !ok {
 				// Orphan result: a tool message without a preceding
@@ -612,6 +642,8 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			return nil, shared.UnsupportedInputItemType(item.Type)
 		}
 	}
+
+	flushToolMedia()
 
 	if len(systemTexts) > 0 {
 		out.Messages = append([]ccMessage{{Role: "system", Content: strings.Join(systemTexts, "\n\n")}}, out.Messages...)
