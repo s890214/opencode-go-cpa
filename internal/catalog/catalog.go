@@ -206,7 +206,7 @@ func New(cfg config.Config, client HostClient) *Manager {
 // gate re-applies, PublicIDs recompute under m's prefix, endpoints re-check
 // against m's base-url, and collisions/diagnostics regenerate (arch §5).
 //
-// m keeps its OWN cfg: subsequent Refresh calls use m's base-url/catalog-url/
+// m keeps its OWN cfg: subsequent Refresh calls use m's base-url/catalog-path/
 // protocols/prefix (F5: a failed-refresh reconfigure must adopt the new
 // manager rather than keep ticking the old URL). Because seeding rebuilds
 // instead of copying, a config change between snapshots takes effect at seed
@@ -233,7 +233,7 @@ func (m *Manager) Refresh(ctx context.Context, apiKey string) error {
 	}
 	req := pluginapi.HTTPRequest{
 		Method: http.MethodGet,
-		URL:    m.cfg.CatalogURL,
+		URL:    strings.TrimRight(m.cfg.BaseURL, "/") + m.cfg.CatalogPath,
 		Headers: http.Header{
 			"Authorization": []string{"Bearer " + apiKey},
 			"Accept":        []string{"application/json"},

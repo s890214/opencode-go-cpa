@@ -493,7 +493,7 @@ func TestRegistrationConfigFields(t *testing.T) {
 	}{
 		{"api-keys", pluginapi.ConfigFieldTypeArray},
 		{"base-url", pluginapi.ConfigFieldTypeString},
-		{"catalog-url", pluginapi.ConfigFieldTypeString},
+		{"catalog-path", pluginapi.ConfigFieldTypeString},
 		{"quota-path", pluginapi.ConfigFieldTypeString},
 		{"model-prefix", pluginapi.ConfigFieldTypeObject},
 		{"catalog", pluginapi.ConfigFieldTypeObject},
@@ -1135,7 +1135,7 @@ func TestShutdownAbortsInFlightTickRefresh(t *testing.T) {
 // fix: a failed-refresh reconfigure must adopt the NEW manager (seeded with
 // the old last-good records) so carried-over models stay visible between the
 // failure and the next success, and background ticks fetch the NEW
-// catalog-url instead of the old one forever.
+// catalog-path instead of the old one forever.
 func TestReconfigureFailedRefreshSeedsCarryoverThenFetchesNewURL(t *testing.T) {
 	oldURL := "https://opencode.ai/inference/go/v1/models"
 	newURL := "https://mirror.test/api/v1/models"
@@ -1160,7 +1160,7 @@ func TestReconfigureFailedRefreshSeedsCarryoverThenFetchesNewURL(t *testing.T) {
 			// Every /models fetch after the reconfigure returned must target
 			// the NEW url; old-loop ticks all complete before it returns.
 			if !allowOldURL.Load() {
-				t.Error("tick used the OLD catalog-url after reconfigure")
+				t.Error("tick used the OLD catalog-path after reconfigure")
 				return hostErr("old_url", url), nil
 			}
 			return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(catalogV1)}), nil

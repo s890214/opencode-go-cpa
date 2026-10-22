@@ -156,7 +156,7 @@ func redactAPIKey(match string) string {
 }
 
 // queryKeyRe redacts secrets carried in URL query strings (FR-011): transport
-// failures conventionally echo the full URL, so base-url/catalog-url keys
+// failures conventionally echo the full URL, so base-url/catalog-path keys
 // passed as ?api_key=… / ?token=… must not survive into envelopes or logs.
 // The value run stops at whitespace, '&', and quotes so consecutive params
 // survive; the replacement keeps the parameter name. Idempotent: the

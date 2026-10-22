@@ -100,9 +100,10 @@ plugins:
       # so it has its own setting.
       # quota-path: "/v1/usage"
 
-      # Catalog discovery (default: "{base-url}/v1/models"). Also separate,
-      # because the upstream serves the model list outside the protocol paths.
-      # catalog-url: "https://opencode.ai/inference/go/v1/models"
+      # Catalog discovery path (default: "/v1/models"), relative to base-url.
+      # Also separate, because the upstream serves the model list outside the
+      # protocol paths.
+      # catalog-path: "/v1/models"
 
       # Client-facing model ID prefix configuration
       model-prefix:
@@ -178,7 +179,7 @@ plugins:
 | `base-url` | `string` | `https://opencode.ai/inference/go` | Upstream service root. Every path below appends to it verbatim. Must be valid HTTPS (or HTTP if `allow-http: true`) without query parameters, fragments, or userinfo. |
 | `protocol-endpoints` | `map` | `/v1/{chat/completions,responses,messages}` | Path of each protocol, appended to `base-url`. Change these when the upstream moves an endpoint. |
 | `quota-path` | `string` | `/v1/usage` | Usage/quota endpoint, relative to `base-url`. Separate from the protocol endpoints. |
-| `catalog-url` | `string` | `{base-url}/v1/models` | Full URL for catalog discovery. Separate from the protocol endpoints because the upstream serves the model list on its own path. |
+| `catalog-path` | `string` | `/v1/models` | Model catalog endpoint, relative to `base-url`. Separate from the protocol endpoints because the upstream serves the model list on its own path. |
 | `model-prefix.enabled` | `bool` | `true` | When `true`, client-facing model names use `<prefix>/<model>`. When `false`, uses bare model IDs. |
 | `model-prefix.value` | `string` | `opencode-go` | Provider prefix string when prefixing is enabled. |
 | `catalog.refresh-interval` | `duration` | `15m` | Interval between catalog polling refreshes (e.g. `15m`, `1h`). Minimum is `1m`. |
@@ -194,7 +195,7 @@ plugins:
 | `route-overrides` | `map` | `{}` | Legacy: `{ protocol, endpoint }` per model, where `protocol` also becomes the default route. Merged into `models`. |
 | `request-timeout` | `duration` | `5m` | Upstream HTTP request timeout. Must be positive. |
 | `max-response-bytes` | `int64` | `67108864` (64 MiB) | Maximum non-streaming response body size in bytes. |
-| `allow-http` | `bool` | `false` | When `true`, permits `http://` scheme in `base-url` / `catalog-url` for local testing. |
+| `allow-http` | `bool` | `false` | When `true`, permits `http://` scheme in `base-url` for local testing. |
 
 ## Testing
 

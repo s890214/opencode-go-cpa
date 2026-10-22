@@ -39,7 +39,8 @@ func (f *fakeClient) set(resp pluginapi.HTTPResponse, err error) {
 
 func testCfg() config.Config {
 	return config.Config{
-		CatalogURL:       "https://opencode.ai/zen/go/v1/models",
+		BaseURL:          "https://opencode.ai/zen/go",
+		CatalogPath:      "/v1/models",
 		ModelPrefix:      config.ModelPrefix{Enabled: true, Value: "opencode-go"},
 		MaxResponseBytes: 1 << 20,
 		Catalog:          config.Catalog{StaleWhileUnavailable: true},
@@ -502,7 +503,7 @@ func TestLookupByPrefixedBareAndMiss(t *testing.T) {
 // TestSeedFromServesOldRecordsWithNewCfg pins the F5 fix: SeedFrom gives m
 // prev's last-good snapshot rebuilt under m's OWN cfg — prefix-off here, so
 // seeded PublicIDs are bare where prev's were prefixed — and subsequent
-// refreshes use m's catalog-url while prev stays untouched.
+// refreshes use m's catalog-path while prev stays untouched.
 func TestSeedFromServesOldRecordsWithNewCfg(t *testing.T) {
 	body := `{"data":[{"id":"glm-5.2"},{"id":"glm-5.2"},{"id":"mystery-model"}]}`
 	prev := newManager(testCfg(), &fakeClient{resp: pluginapi.HTTPResponse{
@@ -512,7 +513,8 @@ func TestSeedFromServesOldRecordsWithNewCfg(t *testing.T) {
 	mustRefresh(t, prev)
 
 	cfg := testCfg()
-	cfg.CatalogURL = "https://mirror.test/api/models"
+	cfg.BaseURL = "https://mirror.test/api"
+	cfg.CatalogPath = "/models"
 	cfg.ModelPrefix.Enabled = false
 	fc := &fakeClient{}
 	m := newManager(cfg, fc)
@@ -535,12 +537,12 @@ func TestSeedFromServesOldRecordsWithNewCfg(t *testing.T) {
 		t.Errorf("seeded warnings = %v, want %v", gotW, wantW)
 	}
 
-	// The next refresh uses m's own cfg: its catalog-url and prefix-off
+	// The next refresh uses m's own cfg: its catalog-path and prefix-off
 	// PublicIDs; prev keeps serving its own snapshot untouched.
 	fc.resp = pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[{"id":"kimi-k3"}]}`)}
 	mustRefresh(t, m)
 	if fc.gotReq.URL != "https://mirror.test/api/models" {
-		t.Errorf("refresh URL = %q, want the seeded manager's own catalog-url", fc.gotReq.URL)
+		t.Errorf("refresh URL = %q, want the seeded manager's own catalog-path", fc.gotReq.URL)
 	}
 	if got := m.Models(); len(got) != 1 || got[0].PublicID != "kimi-k3" || got[0].UpstreamID != "kimi-k3" {
 		t.Errorf("post-seed refresh models = %+v, want prefix-off kimi-k3", got)

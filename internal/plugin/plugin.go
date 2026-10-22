@@ -200,9 +200,9 @@ func pluginConfigFields() []pluginapi.ConfigField {
 			Description: "Upstream service root (default: https://opencode.ai/inference/go). Protocol paths are appended verbatim.",
 		},
 		{
-			Name:        "catalog-url",
+			Name:        "catalog-path",
 			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Catalog discovery URL (default: {base-url}/v1/models).",
+			Description: "Path of the catalog endpoint relative to base-url (default: /v1/models).",
 		},
 		{
 			Name:        "quota-path",
@@ -327,7 +327,7 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	m.cfg = cfg
 	// FR-002 stale-while-unavailable: a failed refresh must neither wipe a
 	// non-empty previous snapshot nor keep the OLD manager, whose stored cfg
-	// would pin the old base-url/catalog-url/protocols/prefix so ticks
+	// would pin the old base-url/catalog-path/protocols/prefix so ticks
 	// fetched the old URL with the new config's keys forever (F5). The NEW
 	// manager is adopted unconditionally; when a previous snapshot exists
 	// AND the NEW config keeps stale-while-unavailable enabled, it is

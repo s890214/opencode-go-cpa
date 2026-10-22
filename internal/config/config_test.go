@@ -28,8 +28,8 @@ func TestLoadMinimalAppliesAllDefaults(t *testing.T) {
 	if c.BaseURL != "https://opencode.ai/inference/go" {
 		t.Errorf("BaseURL = %q", c.BaseURL)
 	}
-	if c.CatalogURL != "https://opencode.ai/inference/go/v1/models" {
-		t.Errorf("CatalogURL = %q", c.CatalogURL)
+	if c.CatalogPath != "/v1/models" {
+		t.Errorf("CatalogPath = %q", c.CatalogPath)
 	}
 	if !c.ModelPrefix.Enabled || c.ModelPrefix.Value != "opencode-go" {
 		t.Errorf("ModelPrefix = %+v", c.ModelPrefix)
@@ -63,7 +63,7 @@ func TestLoadFullConfigHonorsEveryField(t *testing.T) {
 enabled: true
 future-key: 1
 base-url: http://localhost:9090/v1
-catalog-url: https://example.com/models
+catalog-path: /models
 model-prefix:
   enabled: true
   value: myprefix
@@ -91,8 +91,8 @@ max-response-bytes: 1024
 	if c.BaseURL != "http://localhost:9090/v1" {
 		t.Errorf("BaseURL = %q", c.BaseURL)
 	}
-	if c.CatalogURL != "https://example.com/models" {
-		t.Errorf("CatalogURL = %q", c.CatalogURL)
+	if c.CatalogPath != "/models" {
+		t.Errorf("CatalogPath = %q", c.CatalogPath)
 	}
 	if !c.ModelPrefix.Enabled || c.ModelPrefix.Value != "myprefix" {
 		t.Errorf("ModelPrefix = %+v", c.ModelPrefix)
@@ -143,35 +143,39 @@ func TestLoadIgnoresRemovedSchedulerFields(t *testing.T) {
 	}
 }
 
-func TestLoadDerivedCatalogURLFromCustomBase(t *testing.T) {
+// The catalog lives under base-url like every protocol path, so an unset
+// catalog-path keeps the same default wherever base-url points.
+func TestLoadCatalogPathDefaultsRelativeToBase(t *testing.T) {
 	c, err := Load([]byte("base-url: https://upstream.example.com/api\n" + withKey))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if c.CatalogURL != "https://upstream.example.com/api/v1/models" {
-		t.Errorf("CatalogURL = %q", c.CatalogURL)
+	if c.CatalogPath != "/v1/models" {
+		t.Errorf("CatalogPath = %q", c.CatalogPath)
 	}
 }
 
-func TestLoadDerivedCatalogURLTrimsTrailingSlash(t *testing.T) {
-	c, err := Load([]byte("base-url: https://opencode.ai/inference/go/\n" + withKey))
+// An explicit catalog-path ending in "/" is trimmed so the URL joined with
+// base-url never carries a trailing slash.
+func TestLoadExplicitCatalogPathTrimsTrailingSlash(t *testing.T) {
+	c, err := Load([]byte("catalog-path: /api/models///\n" + withKey))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if c.CatalogURL != "https://opencode.ai/inference/go/v1/models" {
-		t.Errorf("CatalogURL = %q, want no double slash", c.CatalogURL)
+	if c.CatalogPath != "/api/models" {
+		t.Errorf("CatalogPath = %q, want trailing slashes trimmed", c.CatalogPath)
 	}
 }
 
-// An EXPLICIT catalog-url ending in "/" must normalize the same way as the
-// derived default, so the stored endpoint never carries a trailing slash.
-func TestLoadExplicitCatalogURLTrimsTrailingSlash(t *testing.T) {
-	c, err := Load([]byte("catalog-url: https://mirror.example.com/api/models///\n" + withKey))
+// An explicitly empty catalog-path falls back to the default, matching
+// quota-path's treatment of an empty override.
+func TestLoadEmptyCatalogPathFallsBackToDefault(t *testing.T) {
+	c, err := Load([]byte("catalog-path: \"\"\n" + withKey))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if c.CatalogURL != "https://mirror.example.com/api/models" {
-		t.Errorf("CatalogURL = %q, want trailing slashes trimmed", c.CatalogURL)
+	if c.CatalogPath != "/v1/models" {
+		t.Errorf("CatalogPath = %q", c.CatalogPath)
 	}
 }
 
@@ -230,16 +234,13 @@ func TestLoadRejections(t *testing.T) {
 			"api-keys[1].value: expanded to empty",
 		},
 		{"explicitly empty base-url", `base-url: ""`, "base-url: must not be empty"},
-		{"explicitly empty catalog-url", `catalog-url: ""`, "catalog-url: must not be empty"},
 		{"malformed base-url", `base-url: "::::"`, "base-url: invalid URL"},
 		{"scheme-less base-url", "base-url: opencode.ai/zen/go/v1", "base-url: invalid URL"},
-		{"malformed catalog-url", `catalog-url: "http://exa mple.com"`, "catalog-url: invalid URL"},
+		{"catalog-path without leading slash", `catalog-path: "models"` + "\n" + withKey, "catalog-path: must start with /"},
+		{"catalog-path given as full URL", `catalog-path: "https://example.com/models"` + "\n" + withKey, "catalog-path: must start with /"},
 		{"http base-url without allow-http", "base-url: http://localhost:9090/v1", "base-url: http scheme requires allow-http"},
-		{"http catalog-url without allow-http", "catalog-url: http://localhost:9090/models", "catalog-url: http scheme requires allow-http"},
 		{"ftp base-url", "base-url: ftp://files.example.com/v1", `base-url: unsupported scheme "ftp"`},
-		{"file catalog-url", "catalog-url: file://host/share/models", `catalog-url: unsupported scheme "file"`},
 		{"ftp base-url with allow-http", "allow-http: true\nbase-url: ftp://files.example.com/v1", `base-url: unsupported scheme "ftp"`},
-		{"file catalog-url with allow-http", "allow-http: true\ncatalog-url: file://host/share/models", `catalog-url: unsupported scheme "file"`},
 		{"refresh-interval missing unit", "catalog:\n  refresh-interval: 5\n", "catalog.refresh-interval: invalid duration"},
 		{"refresh-interval negative", "catalog:\n  refresh-interval: -5m\n" + withKey, "catalog.refresh-interval: must be at least 1m"},
 		{"refresh-interval below floor", "catalog:\n  refresh-interval: 1ms\n" + withKey, "catalog.refresh-interval: must be at least 1m"},

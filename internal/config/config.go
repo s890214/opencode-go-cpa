@@ -123,7 +123,6 @@ func (m ModelConfig) EndpointFor(protocol string) string {
 
 type Config struct {
 	BaseURL     string
-	CatalogURL  string
 	ModelPrefix ModelPrefix
 	APIKeys     []APIKey
 	Catalog     Catalog
@@ -133,6 +132,8 @@ type Config struct {
 	Models map[string]ModelConfig
 	// ProtocolEndpoints overrides each protocol's default path.
 	ProtocolEndpoints map[string]string
+	// CatalogPath is where the model catalog lives, relative to base-url.
+	CatalogPath string
 	// QuotaPath is where the usage endpoint lives, relative to base-url.
 	QuotaPath string
 	// FallbackRoutes resolves a model that `models` does not mention.
@@ -147,7 +148,7 @@ type Config struct {
 // Unknown fields are ignored (host may pass extra keys).
 type rawConfig struct {
 	BaseURL            *string                   `yaml:"base-url"`
-	CatalogURL         *string                   `yaml:"catalog-url"`
+	CatalogPath        *string                   `yaml:"catalog-path"`
 	ModelPrefix        rawPrefix                 `yaml:"model-prefix"`
 	APIKeys            []rawKey                  `yaml:"api-keys"`
 	Catalog            rawCatalog                `yaml:"catalog"`
@@ -245,26 +246,32 @@ func Load(yamlBytes []byte) (Config, error) {
 		},
 		Models:            models,
 		ProtocolEndpoints: protocolEndpoints(raw.ProtocolEndpoints),
+		CatalogPath:       catalogPath(raw.CatalogPath),
 		QuotaPath:         quotaPath(raw.QuotaPath),
 		FallbackRoutes:    fallbackRoutes(raw.FallbackRoutes),
 		AllowHTTP:         raw.AllowHTTP,
 		RequestTimeout:    requestTimeout,
 		MaxResponseBytes:  orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
 	}
-	if raw.CatalogURL != nil {
-		// Mirror the derived-default trim so an explicit trailing-slash
-		// catalog-url cannot double up separators downstream.
-		c.CatalogURL = strings.TrimRight(*raw.CatalogURL, "/")
-	} else {
-		// The catalog is not a protocol endpoint: it lives at /v1/models on
-		// this upstream, so it is derived separately and can be overridden
-		// with catalog-url.
-		c.CatalogURL = strings.TrimRight(c.BaseURL, "/") + "/v1/models"
-	}
 	if err := c.validate(); err != nil {
 		return Config{}, err
 	}
 	return c, nil
+}
+
+// DefaultCatalogPath is where the model catalog sits under base-url. It is
+// not a protocol endpoint, so it has its own setting.
+const DefaultCatalogPath = "/v1/models"
+
+// catalogPath resolves the catalog discovery path relative to base-url. An
+// explicit trailing slash is trimmed so the joined URL never carries one.
+func catalogPath(raw *string) string {
+	if raw != nil {
+		if v := strings.TrimRight(strings.TrimSpace(*raw), "/"); v != "" {
+			return v
+		}
+	}
+	return DefaultCatalogPath
 }
 
 // DefaultQuotaPath is where the usage endpoint sits under base-url. It is not
@@ -441,9 +448,6 @@ func (c Config) validate() error {
 	if err := validateURL("base-url", c.BaseURL, c.AllowHTTP); err != nil {
 		return err
 	}
-	if err := validateURL("catalog-url", c.CatalogURL, c.AllowHTTP); err != nil {
-		return err
-	}
 	if len(c.APIKeys) == 0 {
 		return fmt.Errorf("api-keys: at least one key is required")
 	}
@@ -464,6 +468,9 @@ func (c Config) validate() error {
 	}
 	if c.MaxResponseBytes <= 0 {
 		return fmt.Errorf("max-response-bytes: must be positive")
+	}
+	if c.CatalogPath != "" && !strings.HasPrefix(c.CatalogPath, "/") {
+		return fmt.Errorf("catalog-path: must start with /")
 	}
 	if c.QuotaPath != "" && !strings.HasPrefix(c.QuotaPath, "/") {
 		return fmt.Errorf("quota-path: must start with /")
