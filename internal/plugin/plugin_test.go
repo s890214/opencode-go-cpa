@@ -745,6 +745,7 @@ func TestReconfigureSwapsPrefixIDs(t *testing.T) {
 }
 
 func TestRefreshFailureStillRegistersAndWarnsWithoutSecrets(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir()) // cold catalog cache: nothing to restore
 	m, f := newTestManager(catalogResponder(false, ""))
 	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML))
 	if err != nil {
@@ -813,6 +814,7 @@ func TestRegisterRefreshesWithConfiguredBearer(t *testing.T) {
 // registerRefreshTimeout (10s), never at request-timeout (default 15m), and
 // registration must still succeed with an empty routable set (FR-002).
 func TestRegisterWithBlockingCatalogReturnsQuickly(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir()) // cold catalog cache: nothing to restore
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
