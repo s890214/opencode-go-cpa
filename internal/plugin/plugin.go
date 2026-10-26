@@ -26,7 +26,7 @@ const ProviderID = "opencode-go"
 // pluginName / pluginVersion are reported in registration metadata.
 const (
 	pluginName    = "opencode-go-cpa"
-	pluginVersion = "0.6.2"
+	pluginVersion = "0.6.3"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
@@ -460,13 +460,10 @@ func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config)
 	for i, key := range cfg.APIKeys {
 		id := authRecordID(key.Value)
 		label := accountLabel(cfg, key.Value, "", i)
-		name := authFileName(label, key.Value) + ".json"
 		if _, ok := existing[id]; ok {
 			continue
 		}
-		if _, ok := existing[name]; ok {
-			continue
-		}
+		name := availableAuthName(label, existing)
 		record, err := json.Marshal(struct {
 			Type   string `json:"type"`
 			ID     string `json:"id"`
@@ -647,4 +644,17 @@ func okEnvelope(result any) []byte {
 func ErrEnvelope(code, message string) []byte {
 	out, _ := json.Marshal(pluginabi.Envelope{OK: false, Error: &pluginabi.Error{Code: code, Message: message}})
 	return out
+}
+
+// availableAuthName returns the first free readable file name for a label:
+// "OpenCode-Go.json", then "OpenCode-Go-2.json" for a second account.
+func availableAuthName(label string, existing map[string]struct{}) string {
+	base := sanitizeAuthLabel(label)
+	name := base + ".json"
+	for n := 2; ; n++ {
+		if _, exists := existing[name]; !exists {
+			return name
+		}
+		name = fmt.Sprintf("%s-%d.json", base, n)
+	}
 }

@@ -1,3 +1,15 @@
+## v0.6.3 — plain readable credential file names
+
+### Fixes
+
+- Credential files go back to the plain account label (`OpenCode-Go.json`,
+  `OpenCode-Go-2.json` for a second account). The short digest suffix added in
+  v0.6.2 still showed up in the panel, and because the host derives its auth
+  index from the file path, every rename also created a new stats identity.
+  Ownership is now proven by the `api_key` inside the file instead: a record
+  whose key left `api-keys` is deleted, a record for a configured key is
+  adopted, and hand-written records with unknown keys are never touched.
+
 ## v0.6.2 — readable credential file names
 
 ### Fixes

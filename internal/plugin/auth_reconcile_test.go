@@ -53,14 +53,14 @@ func writeKeyRecord(t *testing.T, path, key string) {
 	}
 }
 
-func TestReconcileAdoptsLegacyFileNameThenRemovesIt(t *testing.T) {
+func TestReconcileKeepsReadableFileNameAndRemovesUnknownKey(t *testing.T) {
 	dir := t.TempDir()
-	legacy := filepath.Join(dir, "OpenCode-Go.json")
+	readable := filepath.Join(dir, authFileName("OpenCode Go")+".json")
 	const key = "sk-legacy-adopt"
-	writeKeyRecord(t, legacy, key)
+	writeKeyRecord(t, readable, key)
 
 	rec := &legacyRecorder{entries: []pluginapi.HostAuthFileEntry{{
-		ID: "OpenCode-Go.json", Name: "OpenCode-Go.json", Type: ProviderID, Provider: ProviderID, Path: legacy,
+		ID: authRecordID(key), Name: authFileName("OpenCode Go") + ".json", Type: ProviderID, Provider: ProviderID, Path: readable,
 	}}}
 	m := NewManager(NewHostBridge(rec.responder()))
 	cfg, err := config.Load([]byte("api-keys:\n  - value: \"" + key + "\"\n"))
@@ -70,26 +70,43 @@ func TestReconcileAdoptsLegacyFileNameThenRemovesIt(t *testing.T) {
 	if err := m.reconcileAuthRecords(context.Background(), cfg); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	canonical := filepath.Join(dir, authFileName("OpenCode Go", key)+".json")
-	if _, err := os.Stat(canonical); err != nil {
-		t.Fatalf("legacy record was not adopted: %v", err)
-	}
-	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
-		t.Fatalf("legacy file still present: %v", err)
+	if _, err := os.Stat(readable); err != nil {
+		t.Fatalf("readable record must stay untouched: %v", err)
 	}
 
-	// Removing the key from the config must now delete the record: its name
-	// carries the digest, so ownership is provable.
-	rec.entries = []pluginapi.HostAuthFileEntry{{
-		ID: authRecordID(key), Name: authFileName("OpenCode Go", key) + ".json", Type: ProviderID, Provider: ProviderID, Path: canonical,
-	}}
+	// Removing the key from the config must delete the record: its api_key is
+	// no longer configured and its file name is one this plugin writes.
 	empty := cfg
 	empty.APIKeys = nil
 	if err := m.reconcileAuthRecords(context.Background(), empty); err != nil {
 		t.Fatalf("reconcile after removal: %v", err)
 	}
-	if _, err := os.Stat(canonical); !os.IsNotExist(err) {
-		t.Fatalf("canonical record survived key removal: %v", err)
+	if _, err := os.Stat(readable); !os.IsNotExist(err) {
+		t.Fatalf("record survived key removal: %v", err)
+	}
+}
+
+func TestReconcileRenamesHashedFileNameToReadable(t *testing.T) {
+	dir := t.TempDir()
+	hashed := filepath.Join(dir, authRecordID("hashed-key-value")+".json")
+	writeKeyRecord(t, hashed, "hashed-key-value")
+	rec := &legacyRecorder{entries: []pluginapi.HostAuthFileEntry{{
+		ID: authRecordID("hashed-key-value"), Name: filepath.Base(hashed), Type: ProviderID, Provider: ProviderID, Path: hashed,
+	}}}
+	m := NewManager(NewHostBridge(rec.responder()))
+	cfg, err := config.Load([]byte("api-keys:\n  - value: hashed-key-value\n"))
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if err := m.reconcileAuthRecords(context.Background(), cfg); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	readable := filepath.Join(dir, authFileName("OpenCode Go")+".json")
+	if _, err := os.Stat(readable); err != nil {
+		t.Fatalf("hashed name was not folded back: %v", err)
+	}
+	if _, err := os.Stat(hashed); !os.IsNotExist(err) {
+		t.Fatalf("hashed file still present: %v", err)
 	}
 }
 
@@ -117,7 +134,7 @@ func TestReconcileReenablesConfiguredRecord(t *testing.T) {
 	dir := t.TempDir()
 	const key = "sk-disabled-one"
 	id := authRecordID(key)
-	fileBase := authFileName("OpenCode Go", key)
+	fileBase := authFileName("OpenCode Go")
 	path := filepath.Join(dir, fileBase+".json")
 	body, _ := json.Marshal(map[string]any{"type": ProviderID, "api_key": key, "disabled": true})
 	if err := os.WriteFile(path, body, 0o600); err != nil {
@@ -154,24 +171,22 @@ func TestReconcileReenablesConfiguredRecord(t *testing.T) {
 }
 
 func TestAuthFileNameIsReadableAndStable(t *testing.T) {
-	const a, b = "token-a", "token-b"
-	name := authFileName("OpenCode Go", a)
-	if name != authFileName("OpenCode Go", a) {
-		t.Fatalf("file name is not stable: %q", name)
+	if got := authFileName("OpenCode Go"); got != "OpenCode-Go" {
+		t.Fatalf("file name is not the readable label: %q", got)
 	}
-	if !strings.HasPrefix(name, "OpenCode-Go-") || len(name) > 40 {
-		t.Fatalf("file name is not readable: %q", name)
+	if got := authFileName("Work"); got != "Work" {
+		t.Fatalf("label not honored: %q", got)
 	}
-	if !hasManagedDigestSuffix(name, a) {
-		t.Fatalf("file name lost its ownership digest: %q", name)
-	}
-	if name == authFileName("OpenCode Go", b) {
-		t.Fatal("different keys share a file name")
-	}
-	if got := authFileName("", a); !strings.HasPrefix(got, "OpenCode-Go-") {
+	if got := authFileName(""); got != "OpenCode-Go" {
 		t.Fatalf("empty label fallback: %q", got)
 	}
-	if got := authFileName("工作 账号/2", a); strings.ContainsAny(got, " /") {
+	if got := authFileName("工作 账号/2"); strings.ContainsAny(got, " /") {
 		t.Fatalf("unsafe characters survived: %q", got)
+	}
+	// A second account with the same label is disambiguated by a suffix, not
+	// by a key digest: the name must never depend on the key.
+	existing := map[string]struct{}{"OpenCode-Go.json": {}}
+	if got := availableAuthName("OpenCode Go", existing); got != "OpenCode-Go-2.json" {
+		t.Fatalf("duplicate label was not disambiguated: %q", got)
 	}
 }
