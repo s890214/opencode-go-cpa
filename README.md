@@ -248,21 +248,20 @@ These endpoints require the CLIProxyAPI management key. The normalized response 
 Missing windows are omitted. Invalid readings return an error, not an invented zero.
 Quota reset is unsupported. The old plugin quota route and resource page are removed.
 
-## Console login and credential lifecycle
+## Credential lifecycle
 
-The plugin implements CPA's auth provider, so a Console account can be linked
-without pasting a key: start a login from the panel and approve the device code
-in the browser (`POST https://opencode.ai/console/auth/device/code`). The
-resulting record stores an access token, a refresh token and the workspace ID;
-the executor sends it as `Authorization: Bearer` plus `x-opencode-org-id`, and
-`auth.refresh` renews it before expiry. API-key records are untouched by the
-refresh path.
+Credentials are API keys only: `api-keys` is the single source of truth and
+there is no browser login. The Console device-code flow that 0.6.0 shipped was
+removed in 0.6.1 — `auth.login.start` / `auth.login.poll` answer with a
+descriptive `auth_failure`, and `auth.refresh` returns API-key records
+untouched because a key never expires. A record without an `api_key` is
+rejected at parse time instead of being accepted as an OAuth credential.
 
-Credential files mirror `api-keys`, which is the single source of truth:
+Credential files mirror `api-keys`:
 a configured key without a record is created, and a record whose key was
 removed from the config is deleted. Deletion is limited to files this plugin
 created — the file name must be `opencode-go-key-<sha256(key)>.json` **and** the
-`api_key` inside must hash to that name. Console OAuth records and hand-written
+`api_key` inside must hash to that name. Hand-written
 files are never deleted automatically, and a record disabled while its key is
 still configured is re-enabled. Removal stages the file under a name the auth
 watcher ignores and then unlinks it, so a partially failed removal cannot leave

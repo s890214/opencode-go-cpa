@@ -90,21 +90,16 @@ func TestAuthDispatchMethods(t *testing.T) {
 	if !got.Handled || got.Auth.Attributes["api_key"] != "sk-dispatch-1" {
 		t.Fatalf("parse dispatch = %#v", got)
 	}
-	// Login is supported (Console device flow); with no host transport it must
-	// fail as an auth failure rather than claim to be unsupported.
+	// Login was removed in 0.6.1: both entry points must answer with a clear
+	// auth failure instead of starting a browser flow.
 	raw, _ = m.HandleCall(pluginabi.MethodAuthLoginStart, mustJSON(pluginapi.AuthLoginStartRequest{Provider: ProviderID}))
-	if env := decodeEnv(t, raw); env.OK || env.Error == nil || env.Error.Code != "auth_failure" {
+	if env := decodeEnv(t, raw); env.OK || env.Error == nil || env.Error.Code != "auth_failure" ||
+		!strings.Contains(env.Error.Message, "api keys") {
 		t.Fatalf("auth.login.start = %#v", env.Error)
 	}
 	raw, _ = m.HandleCall(pluginabi.MethodAuthLoginPoll, []byte(`{}`))
-	var polled pluginapi.AuthLoginPollResponse
-	if env := decodeEnv(t, raw); !env.OK {
+	if env := decodeEnv(t, raw); env.OK || env.Error == nil || env.Error.Code != "auth_failure" {
 		t.Fatalf("auth.login.poll = %#v", env.Error)
-	} else {
-		decodeResult(t, raw, &polled)
-	}
-	if polled.Status != pluginapi.AuthLoginStatusError {
-		t.Fatalf("poll without state = %#v", polled)
 	}
 	raw, err = m.HandleCall(pluginabi.MethodAuthRefresh, mustJSON(struct{ pluginapi.AuthRefreshRequest }{pluginapi.AuthRefreshRequest{AuthID: "id", AuthProvider: ProviderID, Attributes: map[string]string{"api_key": "sk-refresh-1"}}}))
 	if err != nil {

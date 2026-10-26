@@ -38,8 +38,7 @@ func authRecordID(key string) string {
 //
 // Only records this plugin can prove it created are touched: the file name
 // must be the canonical managed name AND the api_key inside must hash to the
-// digest in that name. Console OAuth records and hand-written files are never
-// deleted here.
+// digest in that name. Hand-written files are never deleted here.
 func (m *Manager) reconcileAuthRecords(ctx context.Context, cfg config.Config) error {
 	if m.bridge == nil {
 		return nil
@@ -77,7 +76,7 @@ func (m *Manager) reconcileAuthRecords(ctx context.Context, cfg config.Config) e
 		if json.Unmarshal(data, &record) != nil {
 			continue
 		}
-		if record.isOAuth() || strings.TrimSpace(record.APIKey) == "" {
+		if strings.TrimSpace(record.APIKey) == "" {
 			continue
 		}
 		id := authRecordID(record.APIKey)

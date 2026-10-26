@@ -1,3 +1,33 @@
+## v0.6.1 — API keys only; Console login removed
+
+### Removed
+
+- The Console device-code login (`auth.login.start` / `auth.login.poll`) and
+  its OAuth token refresh are gone. Both entry points now answer with a
+  descriptive `auth_failure` (`opencode-go uses api keys; browser login is not
+  supported`), and `auth.refresh` echoes API-key records untouched.
+- The auth provider no longer talks to the Console: no device-code request, no
+  `/api/user` / `/api/orgs` identity lookup, no token refresh. Records lose the
+  `access_token`, `refresh_token`, `expires_at`, `console_url`, `org_id`,
+  `org_name`, `email`, `account_id` and `plan` fields.
+- The executor no longer sends `x-opencode-org-id` and no longer falls back to
+  an access token: a credential without `api_key` fails with
+  `selected auth has no api key`.
+- A leftover OAuth record on disk is refused at parse time with
+  `has no api key (Console OAuth records are no longer supported)`. It is never
+  auto-deleted — the reconcile pass only removes files it can prove it created.
+
+### Upgrade
+
+- Replace the plugin library and restart CLIProxyAPI. No configuration change:
+  `api-keys` was and remains the only credential source.
+
+### Verification
+
+- `go test ./...`, `go vet ./...`, `gofmt` clean. Login dispatch is pinned by a
+  test that asserts the auth-failure answer, and refresh is pinned to echo the
+  record unchanged.
+
 ## v0.6.0 — Gemini route, Console login, catalog resilience
 
 ### Features

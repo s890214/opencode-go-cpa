@@ -27,7 +27,7 @@ const ProviderID = "opencode-go"
 // pluginName / pluginVersion are reported in registration metadata.
 const (
 	pluginName    = "opencode-go-cpa"
-	pluginVersion = "0.6.0"
+	pluginVersion = "0.6.1"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
@@ -70,7 +70,7 @@ func (m *Manager) authProvider() authProvider {
 	m.mu.RLock()
 	cfg := m.cfg
 	m.mu.RUnlock()
-	return authProvider{cfg: cfg, bridge: m.bridge}
+	return authProvider{cfg: cfg}
 }
 
 // loadMetadata fetches models.dev limits/modalities in the background and

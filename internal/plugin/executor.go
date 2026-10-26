@@ -46,7 +46,6 @@ type resolvedExecution struct {
 	cfg         config.Config
 	rec         catalog.ModelRecord
 	key         string
-	orgID       string
 	tools       shared.ResponseTools
 	passThrough bool
 }
@@ -62,11 +61,6 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 		return nil, classEnvelope(&errclass.Error{Class: errclass.ClassAuth, Message: "selected auth provider is not opencode-go"})
 	}
 	key := strings.TrimSpace(req.AuthAttributes["api_key"])
-	if key == "" {
-		// OAuth-managed records carry an access token instead of an API key.
-		key = strings.TrimSpace(req.AuthAttributes["access_token"])
-	}
-	orgID := strings.TrimSpace(req.AuthAttributes["org_id"])
 	debugTrace("executor auth model=%s auth_id=%s provider=%s attr_api_key_present=%t attr_count=%d storage_json_bytes=%d", req.Model, req.AuthID, req.AuthProvider, key != "", len(req.AuthAttributes), len(req.StorageJSON))
 	if key == "" {
 		return nil, classEnvelope(&errclass.Error{Class: errclass.ClassAuth, Message: "selected auth has no api key"})
@@ -120,7 +114,7 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 	}
 	rt := shared.NewResponseTools()
 	rt.SetReasoningShape(string(rec.ReasoningShape))
-	return &resolvedExecution{cfg: cfg, rec: rec, key: key, orgID: orgID, tools: *rt, passThrough: passThrough}, nil
+	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *rt, passThrough: passThrough}, nil
 }
 
 // upstreamMetadata reports the upstream leg of this execution to the host
@@ -188,7 +182,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 		resp, err = m.bridge.Do(ctx, pluginapi.HTTPRequest{
 			Method:  http.MethodPost,
 			URL:     target,
-			Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, res.orgID, sessionID),
+			Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
 			Body:    sendBody,
 		})
 		if err != nil {
@@ -288,17 +282,13 @@ func upstreamURL(res *resolvedExecution, stream bool) string {
 	return joined
 }
 
-func upstreamAuthHeaders(route catalog.Route, key, orgID, sessionID string) http.Header {
+func upstreamAuthHeaders(route catalog.Route, key, sessionID string) http.Header {
 	var h http.Header
 	if route == catalog.RouteMessages {
 		h = messages.AuthHeaders(key)
 	} else {
 		// Chat Completions, Responses and Gemini endpoints are bearer-based.
 		h = chatcompletions.AuthHeaders(key)
-	}
-	if orgID != "" {
-		// Console OAuth credentials are scoped to one workspace.
-		h.Set("x-opencode-org-id", orgID)
 	}
 	h.Set("x-opencode-session", sessionID)
 	return h
@@ -536,7 +526,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		st, _, id, err = m.bridge.DoStream(ctx, pluginapi.HTTPRequest{
 			Method:  http.MethodPost,
 			URL:     target,
-			Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, res.orgID, sessionID),
+			Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
 			Body:    sendBody,
 		})
 		debugTrace("executor stream DoStream status=%d upstreamID=%s err=%v attempt=%d", st, id, err, attempt)
