@@ -17,6 +17,10 @@ import (
 type StreamConverter struct {
 	inner *chatcompletions.StreamConverter
 	buf   []byte
+	// model is the last modelVersion seen upstream. Gemini sends it with the
+	// first chunk; every client chunk carries it so clients that read the
+	// model from the stream (rather than the request) still see it.
+	model string
 }
 
 // NewStreamConverter builds a converter for one client format.
@@ -40,9 +44,12 @@ func (c *StreamConverter) Feed(chunk []byte) ([][]byte, bool, *errclass.Error) {
 		if data == "" || data == "[DONE]" || !strings.HasPrefix(strings.TrimSpace(line), "data:") {
 			continue
 		}
-		chatChunks, eErr := chunkToChat([]byte(data))
+		chatChunks, model, eErr := chunkToChat([]byte(data), c.model)
 		if eErr != nil {
 			return events, false, eErr
+		}
+		if model != "" {
+			c.model = model
 		}
 		for _, cc := range chatChunks {
 			frame := make([]byte, 0, len(cc)+8)
@@ -69,7 +76,7 @@ func (c *StreamConverter) Flush() [][]byte {
 		line := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(c.buf)), "data:"))
 		c.buf = nil
 		if line != "" && line != "[DONE]" && json.Valid([]byte(line)) {
-			if chunks, eErr := chunkToChat([]byte(line)); eErr == nil {
+			if chunks, _, eErr := chunkToChat([]byte(line), c.model); eErr == nil {
 				for _, cc := range chunks {
 					_, _, _ = c.inner.Feed(append(append([]byte("data: "), cc...), '\n', '\n'))
 				}
@@ -81,11 +88,16 @@ func (c *StreamConverter) Flush() [][]byte {
 
 // chunkToChat renders one Gemini chunk as zero or more Chat Completion
 // chunks: text first, then one chunk per function call, then the finish
-// reason, then a usage-only trailer (OpenAI's include_usage shape).
-func chunkToChat(data []byte) ([][]byte, *errclass.Error) {
+// reason, then a usage-only trailer (OpenAI's include_usage shape). It also
+// returns the modelVersion found in the chunk, if any.
+func chunkToChat(data []byte, fallbackModel string) ([][]byte, string, *errclass.Error) {
 	var resp gResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, errclass.Translation("invalid gemini stream chunk: " + err.Error())
+		return nil, "", errclass.Translation("invalid gemini stream chunk: " + err.Error())
+	}
+	model := fallbackModel
+	if resp.ModelVersion != "" {
+		model = resp.ModelVersion
 	}
 	var out [][]byte
 	var text string
@@ -116,9 +128,10 @@ func chunkToChat(data []byte) ([][]byte, *errclass.Error) {
 	if text != "" {
 		chunk := ccCompletion{
 			Object: "chat.completion.chunk",
+			Model:  model,
 			Choices: []ccChoice{{
 				Index: 0,
-				Delta: &ccMessage{Role: "assistant", Content: text},
+				Delta: &ccDelta{Role: "assistant", Content: text},
 			}},
 		}
 		out = append(out, marshalChunk(chunk))
@@ -126,9 +139,10 @@ func chunkToChat(data []byte) ([][]byte, *errclass.Error) {
 	for _, call := range calls {
 		chunk := ccCompletion{
 			Object: "chat.completion.chunk",
+			Model:  model,
 			Choices: []ccChoice{{
 				Index: 0,
-				Delta: &ccMessage{ToolCalls: []ccToolCall{call}},
+				Delta: &ccDelta{ToolCalls: []ccToolCall{call}},
 			}},
 		}
 		out = append(out, marshalChunk(chunk))
@@ -136,19 +150,20 @@ func chunkToChat(data []byte) ([][]byte, *errclass.Error) {
 	if finish != "" {
 		chunk := ccCompletion{
 			Object: "chat.completion.chunk",
+			Model:  model,
 			Choices: []ccChoice{{
 				Index:        0,
-				Delta:        &ccMessage{},
+				Delta:        &ccDelta{},
 				FinishReason: strPtr(finish),
 			}},
 		}
 		out = append(out, marshalChunk(chunk))
 	}
 	if usage := usageOf(resp.UsageMetadata); usage != nil {
-		chunk := ccCompletion{Object: "chat.completion.chunk", Choices: []ccChoice{}, Usage: usage}
+		chunk := ccCompletion{Object: "chat.completion.chunk", Model: model, Choices: []ccChoice{}, Usage: usage}
 		out = append(out, marshalChunk(chunk))
 	}
-	return out, nil
+	return out, resp.ModelVersion, nil
 }
 
 func marshalChunk(chunk ccCompletion) []byte {

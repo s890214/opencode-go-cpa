@@ -230,3 +230,37 @@ func bytesJoin(chunks [][]byte) []byte {
 	}
 	return out
 }
+
+func TestStreamChunkCarriesModelAndSkipsZeroUsage(t *testing.T) {
+	conv := NewStreamConverter("openai")
+	frame := []byte("data: " + `{"modelVersion":"gemini-4-argon","candidates":[{"content":{"parts":[{"text":"hi"}]}}],"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0}}` + "\n")
+	events, _, eErr := conv.Feed(frame)
+	if eErr != nil {
+		t.Fatalf("Feed: %v", eErr)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d: %q", len(events), events)
+	}
+	got := string(events[0])
+	if !strings.Contains(got, `"model":"gemini-4-argon"`) {
+		t.Fatalf("chunk lost the model: %s", got)
+	}
+	if strings.Contains(got, "usage") {
+		t.Fatalf("zero-usage trailer must not be emitted: %s", got)
+	}
+
+	final := []byte("data: " + `{"candidates":[{"content":{"parts":[{"text":"!"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":2,"totalTokenCount":9}}` + "\n")
+	events, _, eErr = conv.Feed(final)
+	if eErr != nil {
+		t.Fatalf("Feed final: %v", eErr)
+	}
+	var sawUsage bool
+	for _, ev := range events {
+		if strings.Contains(string(ev), `"usage":{"prompt_tokens":7`) {
+			sawUsage = true
+		}
+	}
+	if !sawUsage {
+		t.Fatalf("final usage trailer missing: %q", events)
+	}
+}

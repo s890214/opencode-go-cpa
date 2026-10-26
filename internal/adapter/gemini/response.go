@@ -54,10 +54,19 @@ type ccMessage struct {
 	ToolCalls []ccToolCall `json:"tool_calls,omitempty"`
 }
 
+// ccDelta is the streaming delta shape: every field is optional so a
+// finish-only chunk serializes as `"delta":{}` instead of
+// `{"role":"","content":null}`, which some strict clients reject.
+type ccDelta struct {
+	Role      string       `json:"role,omitempty"`
+	Content   string       `json:"content,omitempty"`
+	ToolCalls []ccToolCall `json:"tool_calls,omitempty"`
+}
+
 type ccChoice struct {
 	Index        int        `json:"index"`
 	Message      *ccMessage `json:"message,omitempty"`
-	Delta        *ccMessage `json:"delta,omitempty"`
+	Delta        *ccDelta   `json:"delta,omitempty"`
 	FinishReason *string    `json:"finish_reason"`
 }
 
@@ -156,6 +165,11 @@ func usageOf(u *struct {
 	total := u.TotalTokenCount
 	if total == 0 {
 		total = u.PromptTokenCount + completion
+	}
+	if total == 0 && u.PromptTokenCount == 0 && completion == 0 {
+		// Gemini streams emit usageMetadata on every chunk; an all-zero
+		// trailer is noise that clients would read as final accounting.
+		return nil
 	}
 	usage := &ccUsage{PromptTokens: u.PromptTokenCount, CompletionTokens: completion, TotalTokens: total}
 	if u.CachedContentTokenCount > 0 {
