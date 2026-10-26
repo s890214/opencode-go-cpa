@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -27,7 +26,7 @@ const ProviderID = "opencode-go"
 // pluginName / pluginVersion are reported in registration metadata.
 const (
 	pluginName    = "opencode-go-cpa"
-	pluginVersion = "0.6.1"
+	pluginVersion = "0.6.2"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
@@ -459,24 +458,22 @@ func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config)
 		}
 	}
 	for i, key := range cfg.APIKeys {
-		digest := sha256.Sum256([]byte(key.Value))
-		hash := hex.EncodeToString(digest[:])
-		id := "opencode-go-key-" + hash
-		name := id + ".json"
+		id := authRecordID(key.Value)
+		label := accountLabel(cfg, key.Value, "", i)
+		name := authFileName(label, key.Value) + ".json"
 		if _, ok := existing[id]; ok {
 			continue
 		}
 		if _, ok := existing[name]; ok {
 			continue
 		}
-		name = availableAuthName(accountLabel(cfg, key.Value, "", i), existing)
 		record, err := json.Marshal(struct {
 			Type   string `json:"type"`
 			ID     string `json:"id"`
 			Label  string `json:"label"`
 			APIKey string `json:"api_key"`
 		}{
-			Type: "opencode-go", ID: id, Label: accountLabel(cfg, key.Value, "", i), APIKey: key.Value,
+			Type: "opencode-go", ID: id, Label: label, APIKey: key.Value,
 		})
 		if err != nil {
 			return fmt.Errorf("build auth record")
@@ -650,29 +647,4 @@ func okEnvelope(result any) []byte {
 func ErrEnvelope(code, message string) []byte {
 	out, _ := json.Marshal(pluginabi.Envelope{OK: false, Error: &pluginabi.Error{Code: code, Message: message}})
 	return out
-}
-
-// Use a readable filename because management clients may show it instead of Label.
-func availableAuthName(label string, existing map[string]struct{}) string {
-	base := strings.Map(func(r rune) rune {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' {
-			return r
-		}
-		return '-'
-	}, label)
-	base = strings.Trim(base, "-")
-	if base == "" {
-		base = "OpenCode-Go"
-	}
-	runes := []rune(base)
-	if len(runes) > 80 {
-		base = string(runes[:80])
-	}
-	name := base + ".json"
-	for n := 2; ; n++ {
-		if _, exists := existing[name]; !exists {
-			return name
-		}
-		name = fmt.Sprintf("%s-%d.json", base, n)
-	}
 }

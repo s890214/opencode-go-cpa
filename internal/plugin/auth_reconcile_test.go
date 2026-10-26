@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -69,7 +70,7 @@ func TestReconcileAdoptsLegacyFileNameThenRemovesIt(t *testing.T) {
 	if err := m.reconcileAuthRecords(context.Background(), cfg); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	canonical := filepath.Join(dir, authRecordID(key)+".json")
+	canonical := filepath.Join(dir, authFileName("OpenCode Go", key)+".json")
 	if _, err := os.Stat(canonical); err != nil {
 		t.Fatalf("legacy record was not adopted: %v", err)
 	}
@@ -80,7 +81,7 @@ func TestReconcileAdoptsLegacyFileNameThenRemovesIt(t *testing.T) {
 	// Removing the key from the config must now delete the record: its name
 	// carries the digest, so ownership is provable.
 	rec.entries = []pluginapi.HostAuthFileEntry{{
-		ID: authRecordID(key), Name: authRecordID(key) + ".json", Type: ProviderID, Provider: ProviderID, Path: canonical,
+		ID: authRecordID(key), Name: authFileName("OpenCode Go", key) + ".json", Type: ProviderID, Provider: ProviderID, Path: canonical,
 	}}
 	empty := cfg
 	empty.APIKeys = nil
@@ -116,13 +117,14 @@ func TestReconcileReenablesConfiguredRecord(t *testing.T) {
 	dir := t.TempDir()
 	const key = "sk-disabled-one"
 	id := authRecordID(key)
-	path := filepath.Join(dir, id+".json")
+	fileBase := authFileName("OpenCode Go", key)
+	path := filepath.Join(dir, fileBase+".json")
 	body, _ := json.Marshal(map[string]any{"type": ProviderID, "api_key": key, "disabled": true})
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	rec := &legacyRecorder{entries: []pluginapi.HostAuthFileEntry{{
-		ID: id, Name: id + ".json", Type: ProviderID, Provider: ProviderID, Path: path, Disabled: true,
+		ID: id, Name: fileBase + ".json", Type: ProviderID, Provider: ProviderID, Path: path, Disabled: true,
 	}}}
 	m := NewManager(NewHostBridge(rec.responder()))
 	cfg, err := config.Load([]byte("api-keys:\n  - value: \"" + key + "\"\n"))
@@ -134,7 +136,7 @@ func TestReconcileReenablesConfiguredRecord(t *testing.T) {
 	}
 	var found bool
 	for _, save := range rec.saves {
-		if save.Name != id+".json" {
+		if save.Name != fileBase+".json" {
 			continue
 		}
 		var record map[string]any
@@ -148,5 +150,28 @@ func TestReconcileReenablesConfiguredRecord(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("record was not re-enabled: %+v", rec.saves)
+	}
+}
+
+func TestAuthFileNameIsReadableAndStable(t *testing.T) {
+	const a, b = "token-a", "token-b"
+	name := authFileName("OpenCode Go", a)
+	if name != authFileName("OpenCode Go", a) {
+		t.Fatalf("file name is not stable: %q", name)
+	}
+	if !strings.HasPrefix(name, "OpenCode-Go-") || len(name) > 40 {
+		t.Fatalf("file name is not readable: %q", name)
+	}
+	if !hasManagedDigestSuffix(name, a) {
+		t.Fatalf("file name lost its ownership digest: %q", name)
+	}
+	if name == authFileName("OpenCode Go", b) {
+		t.Fatal("different keys share a file name")
+	}
+	if got := authFileName("", a); !strings.HasPrefix(got, "OpenCode-Go-") {
+		t.Fatalf("empty label fallback: %q", got)
+	}
+	if got := authFileName("工作 账号/2", a); strings.ContainsAny(got, " /") {
+		t.Fatalf("unsafe characters survived: %q", got)
 	}
 }

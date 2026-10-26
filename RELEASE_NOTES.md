@@ -1,3 +1,15 @@
+## v0.6.2 — readable credential file names
+
+### Fixes
+
+- Managed credential files are now written as `<Label>-<short key digest>.json`
+  (for example `OpenCode-Go-e9918602a0b8.json`) instead of the 64-hex
+  `opencode-go-key-<digest>.json` name, so the credentials list shows a human
+  readable account name. Existing files are migrated on load. The auth id
+  inside the JSON is unchanged, so the host's auth index and usage history stay
+  stable, and the digest suffix still proves ownership: records for removed
+  keys are deleted and hand-written files are never touched.
+
 ## v0.6.1 — API keys only; Console login removed
 
 ### Removed
