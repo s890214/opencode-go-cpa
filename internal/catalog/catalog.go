@@ -15,8 +15,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
@@ -36,6 +38,10 @@ const (
 	RouteChatCompletions Route = "chat-completions"
 	RouteMessages        Route = "messages"
 	RouteResponses       Route = "responses"
+	// RouteGemini is the Google generateContent protocol. Its endpoint is a
+	// prefix: the model and action live in the path, so the executor appends
+	// them (see gemini.UpstreamURL).
+	RouteGemini Route = "gemini"
 )
 
 // EndpointPath returns the upstream endpoint path for the route (FR-004).
@@ -50,6 +56,7 @@ var routeEndpoints = map[Route]string{
 	RouteChatCompletions: "/v1/chat/completions",
 	RouteMessages:        "/v1/messages",
 	RouteResponses:       "/v1/responses",
+	RouteGemini:          "/google/v1beta/models",
 }
 
 // EndpointPath returns the route's upstream endpoint path, or "" for
@@ -87,6 +94,13 @@ type ModelRecord struct {
 	InputModes    []string
 	OutputModes   []string
 	Thinking      *pluginapi.ThinkingSupport
+}
+
+// retiredModels lists upstream ids that are still advertised by the catalog
+// endpoint but answer 410 Gone. They are excluded from the routable set so a
+// client cannot pick a model that always fails.
+var retiredModels = map[string]string{
+	"gemini-4-argon-contributor": "retired by upstream (HTTP 410)",
 }
 
 // UnsupportedModel is a discovered model excluded from the routable set,
@@ -187,6 +201,10 @@ type Manager struct {
 	// snapshot was built).
 	raw    []rawModel
 	models []ModelRecord
+	// metadata fills gaps the upstream catalog leaves (models.dev feed).
+	metadata map[string]ModelMetadata
+	// cachePath persists the last good entries; empty disables persistence.
+	cachePath string
 	// index maps both PublicID and UpstreamID to their record so ID
 	// resolution is O(1); rebuilt atomically with models on every swap.
 	index map[string]ModelRecord
@@ -305,6 +323,12 @@ modelLoop:
 			continue
 		}
 		seen[e.ID] = true
+		if reason, retired := retiredModels[e.ID]; retired {
+			// The upstream still lists these ids but answers 410, so a
+			// routable snapshot must not advertise them.
+			unsup = append(unsup, UnsupportedModel{UpstreamID: e.ID, Reason: reason})
+			continue
+		}
 		route, endpoint, ok, warn := m.resolve(e)
 		if warn != "" {
 			warns = append(warns, warn)
@@ -355,6 +379,21 @@ modelLoop:
 		}
 		inputModes := firstNonEmpty(e.InputModes, e.InputModalities)
 		outputModes := firstNonEmpty(e.OutputModes, e.OutputModalities)
+		ctxLimit := e.ContextLength
+		outLimit := e.MaxOutputTokens
+		meta, metaKnown := metadataFor(m.metadata, e.ID)
+		if ctxLimit == 0 {
+			ctxLimit = meta.ContextLimit
+		}
+		if outLimit == 0 {
+			outLimit = meta.OutputLimit
+		}
+		if len(inputModes) == 0 {
+			inputModes = meta.InputModes
+		}
+		if len(outputModes) == 0 {
+			outputModes = meta.OutputModes
+		}
 		display := e.DisplayName
 		if display == "" {
 			display = e.ID
@@ -368,11 +407,11 @@ modelLoop:
 			ReasoningShape:     m.reasoningShapeFor(e.ID),
 			EndpointPaths:      endpointPaths,
 			EndpointPath:       endpoint,
-			ContextLimit:       e.ContextLength,
-			OutputLimit:        e.MaxOutputTokens,
+			ContextLimit:       ctxLimit,
+			OutputLimit:        outLimit,
 			InputModes:         inputModes,
 			OutputModes:        outputModes,
-			Thinking:           normalizeThinking(e.Thinking),
+			Thinking:           mergeThinking(normalizeThinking(e.Thinking), meta, metaKnown),
 		}
 		// With a prefix enabled, one record's PublicID can equal another
 		// record's UpstreamID (upstream "foo" and "opencode-go/foo" both
@@ -417,6 +456,7 @@ modelLoop:
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.raw, m.models, m.index, m.unsup, m.warns = entries, models, index, unsup, warns
+	m.persistLocked(entries)
 }
 
 // protocolEnabled reports whether the resolved route's protocol flag is on
@@ -472,6 +512,8 @@ func (m *Manager) protocolEnabled(r Route) bool {
 		return m.cfg.Protocols.Messages
 	case RouteResponses:
 		return m.cfg.Protocols.Responses
+	case RouteGemini:
+		return m.cfg.Protocols.Gemini
 	}
 	return true
 }
@@ -595,6 +637,68 @@ func normalizeThinking(rt *rawThinking) *pluginapi.ThinkingSupport {
 		t.Levels = append([]string(nil), rt.Levels...)
 	}
 	return t
+}
+
+// SetCachePath enables persistence of the last good catalog snapshot at path.
+func (m *Manager) SetCachePath(path string) {
+	m.mu.Lock()
+	m.cachePath = strings.TrimSpace(path)
+	m.mu.Unlock()
+}
+
+// SetMetadata installs the models.dev metadata and rebuilds the snapshot from
+// the current entries, so limits/thinking levels apply immediately instead of
+// waiting for the next upstream refresh.
+func (m *Manager) SetMetadata(meta map[string]ModelMetadata) {
+	m.mu.Lock()
+	raw := m.raw
+	m.metadata = meta
+	m.mu.Unlock()
+	if len(raw) > 0 {
+		m.swap(raw)
+	}
+}
+
+// Restore loads the last good snapshot from disk. It is used at startup before
+// the first refresh: without it a fresh process serves no models until the
+// upstream answers (a catalog outage would leave the provider empty).
+// Restore does not consult catalog.stale-while-unavailable — a cache on disk
+// is exactly the stale snapshot that policy is about.
+func (m *Manager) Restore() bool {
+	m.mu.Lock()
+	path := m.cachePath
+	m.mu.Unlock()
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var cached catalogCache
+	if json.Unmarshal(data, &cached) != nil || len(cached.Entries) == 0 {
+		return false
+	}
+	m.swap(cached.Entries, "catalog restored from cache")
+	return true
+}
+
+// persistLocked writes the current entries to the cache path. Failure is
+// silent by design: a read-only mount must not break catalog refresh.
+func (m *Manager) persistLocked(entries []rawModel) {
+	if m.cachePath == "" || len(entries) == 0 {
+		return
+	}
+	payload, err := json.Marshal(catalogCache{FetchedAt: time.Now().UTC(), Entries: entries})
+	if err != nil {
+		return
+	}
+	tmp := m.cachePath + ".tmp"
+	if os.WriteFile(tmp, payload, 0o600) == nil {
+		if os.Rename(tmp, m.cachePath) != nil {
+			_ = os.Remove(tmp)
+		}
+	}
 }
 
 // Models returns the routable snapshot (FR-003 identity fields). The slice

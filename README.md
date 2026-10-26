@@ -9,7 +9,7 @@ The plugin unifies model discovery, protocol translation, and execution across O
 
 ## The Problem
 
-OpenCode Go exposes models across multiple API protocols (OpenAI Chat Completions `/v1/chat/completions`, Anthropic Messages `/v1/messages`, and OpenAI Responses `/v1/responses`).
+OpenCode Go exposes models across multiple API protocols (OpenAI Chat Completions `/v1/chat/completions`, Anthropic Messages `/v1/messages`, OpenAI Responses `/v1/responses`, and Gemini `generateContent` under `/google/v1beta/models`).
 
 Without this plugin, using OpenCode Go in CLIProxyAPI requires configuring separate provider blocks for each protocol family. This leads to:
 - **Duplicated configuration & keys**: The same API keys must be configured across multiple provider blocks.
@@ -164,11 +164,21 @@ plugins:
         chat-completions: true   # enables models routed to /v1/chat/completions
         messages: true           # enables models routed to /v1/messages
         responses: true          # enables models routed to /v1/responses
+        gemini: true             # enables models routed to /google/v1beta/models
 
       # Execution settings
-      request-timeout: "5m"              # upstream request timeout (default: "5m")
+      request-timeout: "5m"              # total upstream request budget (default: "5m")
+      stream-idle-timeout: "5m"          # max silence between stream chunks (default: "5m")
       max-response-bytes: 67108864       # max non-streaming response body size in bytes (default: 64 MiB)
       allow-http: false                  # allow http:// scheme for local mock/testing (default: false)
+
+      # Optional: last-good catalog snapshot, served before the first refresh
+      # completes (default: <user-cache-dir>/opencode-go/catalog.json)
+      # catalog-cache-path: "/var/lib/cliproxyapi/opencode-go-catalog.json"
+
+      # Optional: models.dev metadata used to fill limits/modalities/thinking
+      # levels the upstream catalog omits
+      # metadata-url: "https://models.opencode.ai/api.json"
 ```
 
 ### Configuration Options
@@ -187,15 +197,19 @@ plugins:
 | `protocols.chat-completions` | `bool` | `true` | Protocol switch for Chat Completions endpoints. |
 | `protocols.messages` | `bool` | `true` | Protocol switch for Messages endpoints. |
 | `protocols.responses` | `bool` | `true` | Protocol switch for Responses endpoints. |
+| `protocols.gemini` | `bool` | `true` | Protocol switch for models routed to the Gemini `generateContent` endpoint (`/google/v1beta/models`). Gemini is an upstream route only: clients still speak chat/messages/responses. |
 | `models` | `map` | `{}` | Per-model policy: `protocols` (ordered, first = default route), `reasoning-shape` (`summary` \| `content`), `endpoints` (per-protocol path override). A model listed here owns its route outright. |
 | `fallback-routes` | `[]object` | *(built-in table)* | Family prefixes for models `models` does not list (`{prefix, protocol}`, first match wins). Omit the key to use the built-in table; `[]` disables guessing. |
 | `models.<id>.reasoning-shape` | `string` | `summary` | Wire form of the reasoning item on the Responses route. `deepseek-v4-pro` needs `content`; every other measured model needs `summary` (or answers 503 for `content`). |
 | `models.<id>.endpoints` | `map` | `{}` | Optional path override per protocol; only needed when a protocol is not served at its default path. |
 | `protocol-preference` | `map` | `{}` | Legacy: protocols a model speaks natively. Merged into `models`. |
 | `route-overrides` | `map` | `{}` | Legacy: `{ protocol, endpoint }` per model, where `protocol` also becomes the default route. Merged into `models`. |
-| `request-timeout` | `duration` | `5m` | Upstream HTTP request timeout. Must be positive. |
+| `request-timeout` | `duration` | `5m` | Total upstream HTTP request budget. Must be positive. |
+| `stream-idle-timeout` | `duration` | `5m` | Maximum silence between stream chunks before the stream is closed. A long answer that keeps streaming is never cut; only a stalled upstream trips it. Must be positive. |
+| `catalog-cache-path` | `string` | `<user-cache-dir>/opencode-go/catalog.json` | Absolute path of the last-good catalog snapshot. It is served immediately at startup, before the first refresh, so a catalog outage at boot does not expose an empty model list. |
 | `max-response-bytes` | `int64` | `67108864` (64 MiB) | Maximum non-streaming response body size in bytes. |
 | `allow-http` | `bool` | `false` | When `true`, permits `http://` scheme in `base-url` for local testing. |
+| `metadata-url` | `string` | `https://models.opencode.ai/api.json` | models.dev-style metadata feed. The upstream model list only returns IDs, so this fills context/output limits, modalities and thinking levels. Upstream values always win; metadata only fills gaps. Fetched in the background; failures are ignored. |
 
 ## Testing
 
@@ -205,6 +219,9 @@ go test -tags debug ./...
 
 # Run tests with coverage
 go test -tags debug ./... -cover
+
+# Optional: hit the real upstream through the Gemini adapter (needs a key)
+OPENCODE_LIVE=1 OPENCODE_GO_API_KEY=... go test ./internal/adapter/gemini -run TestLive -v
 
 # Run linter / vetting
 go vet ./...
@@ -230,3 +247,23 @@ These endpoints require the CLIProxyAPI management key. The normalized response 
 `subscription.plan`, `groups[].buckets[].window`, `remainingFraction`, and `resetTime`.
 Missing windows are omitted. Invalid readings return an error, not an invented zero.
 Quota reset is unsupported. The old plugin quota route and resource page are removed.
+
+## Console login and credential lifecycle
+
+The plugin implements CPA's auth provider, so a Console account can be linked
+without pasting a key: start a login from the panel and approve the device code
+in the browser (`POST https://opencode.ai/console/auth/device/code`). The
+resulting record stores an access token, a refresh token and the workspace ID;
+the executor sends it as `Authorization: Bearer` plus `x-opencode-org-id`, and
+`auth.refresh` renews it before expiry. API-key records are untouched by the
+refresh path.
+
+Credential files mirror `api-keys`, which is the single source of truth:
+a configured key without a record is created, and a record whose key was
+removed from the config is deleted. Deletion is limited to files this plugin
+created — the file name must be `opencode-go-key-<sha256(key)>.json` **and** the
+`api_key` inside must hash to that name. Console OAuth records and hand-written
+files are never deleted automatically, and a record disabled while its key is
+still configured is re-enabled. Removal stages the file under a name the auth
+watcher ignores and then unlinks it, so a partially failed removal cannot leave
+a loadable credential behind.

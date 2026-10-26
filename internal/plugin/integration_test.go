@@ -1114,7 +1114,10 @@ func TestNoKeyLeakageE2E(t *testing.T) {
 			}
 			headers, _ := wire["headers"].(map[string]any)
 			auth, _ := headers["Authorization"].([]any)
-			authVal, _ := auth[0].(string)
+			authVal := ""
+			if len(auth) > 0 {
+				authVal, _ = auth[0].(string)
+			}
 			foundInHeaders := strings.Contains(authVal, "sk-test-")
 			delete(wire, "headers")
 			rest, _ := json.Marshal(wire)

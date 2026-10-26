@@ -37,19 +37,25 @@ var EndpointPath = catalog.RouteResponses.EndpointPath()
 // Unknown formats are ClassUnsupported; malformed input is
 // ClassTranslation; messages are descriptive and redacted.
 func BuildRequest(upstreamModel string, sourceFormat string, sourceBody []byte, ts *pluginapi.ThinkingSupport, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
+	var body []byte
+	var eErr *errclass.Error
 	switch sourceFormat {
 	case "openai-response":
-		if !strings.HasPrefix(strings.ToLower(upstreamModel), "gpt") {
-			return fromResponsesNormalized(upstreamModel, sourceBody, tools...)
+		if strings.HasPrefix(strings.ToLower(upstreamModel), "gpt") {
+			return shared.RewriteModelID(upstreamModel, sourceBody, "openai-response")
 		}
-		return shared.RewriteModelID(upstreamModel, sourceBody, "openai-response")
+		body, eErr = fromResponsesNormalized(upstreamModel, sourceBody, tools...)
 	case "openai":
-		return fromChatCompletions(upstreamModel, sourceBody, ts, tools...)
+		body, eErr = fromChatCompletions(upstreamModel, sourceBody, ts, tools...)
 	case "claude":
-		return fromClaudeMessages(upstreamModel, sourceBody, ts, tools...)
+		body, eErr = fromClaudeMessages(upstreamModel, sourceBody, ts, tools...)
 	default:
 		return nil, shared.UnsupportedFormat(sourceFormat, EndpointPath)
 	}
+	if eErr != nil {
+		return nil, eErr
+	}
+	return body, nil
 }
 
 // reasoningForCall renders the reasoning item that must precede a

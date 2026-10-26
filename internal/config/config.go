@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -15,11 +16,16 @@ import (
 
 // Defaults (spec 04 §2/§4).
 const (
-	DefaultBaseURL          = "https://opencode.ai/inference/go"
-	DefaultModelPrefix      = "opencode-go"
-	DefaultRefreshInterval  = 15 * time.Minute
-	DefaultRequestTimeout   = 5 * time.Minute
-	DefaultMaxResponseBytes = int64(67108864) // 64 MiB
+	DefaultBaseURL           = "https://opencode.ai/inference/go"
+	DefaultModelPrefix       = "opencode-go"
+	DefaultRefreshInterval   = 15 * time.Minute
+	DefaultRequestTimeout    = 5 * time.Minute
+	DefaultStreamIdleTimeout = 5 * time.Minute
+	DefaultMaxResponseBytes  = int64(67108864) // 64 MiB
+	// DefaultMetadataURL is models.dev's aggregated metadata feed. The
+	// opencode-go section carries per-model limits, reasoning options and
+	// modalities that the upstream /v1/models response omits.
+	DefaultMetadataURL = "https://models.opencode.ai/api.json"
 )
 
 type ModelPrefix struct {
@@ -41,6 +47,10 @@ type Protocols struct {
 	ChatCompletions bool
 	Messages        bool
 	Responses       bool
+	// Gemini gates the Google generateContent upstream route. It is an
+	// upstream protocol only: inbound Gemini-native clients are not
+	// registered, so this never changes what CPA may send us.
+	Gemini bool
 }
 
 // Enabled reports whether one protocol switch is on. Pass-through honours
@@ -54,6 +64,8 @@ func (p Protocols) Enabled(protocol string) bool {
 		return p.Messages
 	case "responses":
 		return p.Responses
+	case "gemini":
+		return p.Gemini
 	}
 	return false
 }
@@ -87,10 +99,15 @@ type FallbackRoute struct {
 // DefaultProtocolEndpoints are the paths each protocol lives at when the
 // operator does not override them. They are configuration, not constants:
 // an upstream can move a path without needing a new plugin build.
+//
+// gemini is a prefix: the model id and the action (":generateContent" /
+// ":streamGenerateContent?alt=sse") are appended by the adapter, because the
+// Google API puts both in the path.
 var DefaultProtocolEndpoints = map[string]string{
 	"chat-completions": "/v1/chat/completions",
 	"messages":         "/v1/messages",
 	"responses":        "/v1/responses",
+	"gemini":           "/google/v1beta/models",
 }
 
 // ModelConfig is one upstream model's policy: which protocols it speaks
@@ -141,6 +158,17 @@ type Config struct {
 	AllowHTTP        bool
 	RequestTimeout   time.Duration
 	MaxResponseBytes int64
+	// StreamIdleTimeout bounds the gap between two upstream stream chunks.
+	// It replaces the old hard cap on total stream duration: a long answer
+	// that keeps producing data is never cut, a stalled one still is.
+	StreamIdleTimeout time.Duration
+	// CatalogCachePath persists the last good upstream catalog so a fresh
+	// process can serve models before (or without) a successful refresh.
+	// Empty disables persistence.
+	CatalogCachePath string
+	// MetadataURL is models.dev-style metadata (limits, reasoning options,
+	// modalities) merged underneath the upstream catalog. Empty disables it.
+	MetadataURL string
 }
 
 // rawConfig mirrors the YAML shape; pointer fields distinguish "unset"
@@ -161,7 +189,10 @@ type rawConfig struct {
 	ProtocolPreference map[string][]string       `yaml:"protocol-preference"`
 	AllowHTTP          bool                      `yaml:"allow-http"`
 	RequestTimeout     *string                   `yaml:"request-timeout"`
+	StreamIdleTimeout  *string                   `yaml:"stream-idle-timeout"`
 	MaxResponseBytes   *int64                    `yaml:"max-response-bytes"`
+	CatalogCachePath   *string                   `yaml:"catalog-cache-path"`
+	MetadataURL        *string                   `yaml:"metadata-url"`
 }
 
 // rawModelConfig mirrors one entry of the `models` block.
@@ -193,10 +224,11 @@ type rawProtocols struct {
 	ChatCompletions *bool `yaml:"chat-completions"`
 	Messages        *bool `yaml:"messages"`
 	Responses       *bool `yaml:"responses"`
+	Gemini          *bool `yaml:"gemini"`
 }
 
 var (
-	validProtocols = map[string]bool{"chat-completions": true, "messages": true, "responses": true}
+	validProtocols = map[string]bool{"chat-completions": true, "messages": true, "responses": true, "gemini": true}
 )
 
 // Load decodes YAML, expands ${VAR} references in api-key values only,
@@ -226,6 +258,26 @@ func Load(yamlBytes []byte) (Config, error) {
 	if requestTimeout <= 0 {
 		return Config{}, fmt.Errorf("request-timeout: must be positive")
 	}
+	streamIdleTimeout, err := parseDuration("stream-idle-timeout", raw.StreamIdleTimeout, DefaultStreamIdleTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	if streamIdleTimeout <= 0 {
+		return Config{}, fmt.Errorf("stream-idle-timeout: must be positive")
+	}
+	cachePath := ""
+	if raw.CatalogCachePath != nil {
+		cachePath = strings.TrimSpace(*raw.CatalogCachePath)
+	}
+	if cachePath == "" {
+		// Persisting the last good catalog is the difference between "works
+		// after a restart" and "no models until the upstream answers".
+		cachePath = defaultCatalogCachePath()
+	}
+	metadataURL := DefaultMetadataURL
+	if raw.MetadataURL != nil {
+		metadataURL = strings.TrimSpace(*raw.MetadataURL)
+	}
 	// Fold the `models` block and the legacy tables into one policy map.
 	models := mergeModels(raw)
 	c := Config{
@@ -243,6 +295,7 @@ func Load(yamlBytes []byte) (Config, error) {
 			ChatCompletions: orDefault(raw.Protocols.ChatCompletions, true),
 			Messages:        orDefault(raw.Protocols.Messages, true),
 			Responses:       orDefault(raw.Protocols.Responses, true),
+			Gemini:          orDefault(raw.Protocols.Gemini, true),
 		},
 		Models:            models,
 		ProtocolEndpoints: protocolEndpoints(raw.ProtocolEndpoints),
@@ -251,7 +304,10 @@ func Load(yamlBytes []byte) (Config, error) {
 		FallbackRoutes:    fallbackRoutes(raw.FallbackRoutes),
 		AllowHTTP:         raw.AllowHTTP,
 		RequestTimeout:    requestTimeout,
+		StreamIdleTimeout: streamIdleTimeout,
 		MaxResponseBytes:  orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
+		CatalogCachePath:  cachePath,
+		MetadataURL:       metadataURL,
 	}
 	if err := c.validate(); err != nil {
 		return Config{}, err
@@ -475,6 +531,14 @@ func (c Config) validate() error {
 	if c.QuotaPath != "" && !strings.HasPrefix(c.QuotaPath, "/") {
 		return fmt.Errorf("quota-path: must start with /")
 	}
+	if c.MetadataURL != "" {
+		if err := validateURL("metadata-url", c.MetadataURL, c.AllowHTTP); err != nil {
+			return err
+		}
+	}
+	if c.CatalogCachePath != "" && !filepath.IsAbs(c.CatalogCachePath) {
+		return fmt.Errorf("catalog-cache-path: must be absolute")
+	}
 	for protocol, path := range c.ProtocolEndpoints {
 		if !validProtocols[protocol] {
 			return fmt.Errorf("protocol-endpoints: unsupported protocol %q", protocol)
@@ -585,4 +649,15 @@ func orDefault[T any](p *T, def T) T {
 		return *p
 	}
 	return def
+}
+
+// defaultCatalogCachePath keeps the last good catalog snapshot inside the
+// user cache directory, so a cold start reuses it with no configuration.
+// An empty return (no usable HOME) simply disables persistence.
+func defaultCatalogCachePath() string {
+	dir, err := os.UserCacheDir()
+	if err != nil || strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	return filepath.Join(dir, "opencode-go", "catalog.json")
 }

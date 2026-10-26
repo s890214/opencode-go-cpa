@@ -1,3 +1,36 @@
+## v0.6.0 — Gemini route, Console login, catalog resilience
+
+### Features
+
+- Gemini `generateContent` becomes a first-class upstream route
+  (`/google/v1beta/models`, streaming via `:streamGenerateContent?alt=sse`).
+  Clients keep speaking chat/messages/responses: requests are normalized
+  through the Chat adapter and responses are rendered back by the existing
+  converters, so only the Gemini wire shape is new. Verified live against
+  `gemini-4-argon` in both modes.
+- Console device-code login (`auth.login.start` / `auth.login.poll`) plus
+  token refresh. Records keep the access token, refresh token and workspace
+  ID; the executor sends `x-opencode-org-id` with the bearer credential.
+- Last-good catalog snapshot (`catalog-cache-path`): served at startup before
+  the first refresh, so a catalog outage no longer leaves the provider empty.
+- models.dev metadata (`metadata-url`) fills context/output limits, modalities
+  and thinking levels the upstream catalog omits. Upstream values always win.
+- Managed credential records now mirror `api-keys`: records whose key was
+  removed from the config are deleted, and a disabled record for a configured
+  key is re-enabled. Only files whose `api_key` hashes to their own canonical
+  name are touched; OAuth records and hand-written files are never deleted.
+
+### Fixes
+
+- Stream watchdog measures silence between chunks (`stream-idle-timeout`,
+  default 5m) instead of total runtime, so long answers are no longer cut at
+  the request budget while stalled upstreams still fail fast.
+- A thinking-mode `400` that rejects replayed tool call ids now retries once
+  with normalized ids instead of failing the turn; ids are left untouched when
+  the upstream accepts them, keeping the client's echo contract intact.
+- Retired model ids still advertised by the catalog (`gemini-4-argon-contributor`,
+  HTTP 410) are excluded from the routable set.
+
 ## v0.5.7 — report the upstream leg through response metadata
 
 ### Changes

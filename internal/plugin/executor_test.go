@@ -149,6 +149,9 @@ func wrapWithCatalog(catalogBody string, next func(string, []byte) ([]byte, erro
 		if method == pluginabi.MethodHostHTTPDo {
 			if url, _ := wire["url"].(string); strings.HasSuffix(url, "/models") {
 				return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(catalogBody)}), nil
+			} else if strings.HasSuffix(url, "/api.json") {
+				// Optional models.dev metadata: empty feed keeps tests hermetic.
+				return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(`{}`)}), nil
 			}
 		}
 		return next(method, payload)
@@ -158,6 +161,15 @@ func wrapWithCatalog(catalogBody string, next func(string, []byte) ([]byte, erro
 func lastWire(t *testing.T, f *fakeCaller, method string) map[string]any {
 	t.Helper()
 	calls := f.callsOf(method)
+	// Metadata enrichment issues its own host.http.do calls; assertions here
+	// are about the inference leg, so skip the models.dev fetch.
+	var inference []capturedCall
+	for _, call := range calls {
+		if !strings.Contains(string(call.payload), "models.opencode.ai") {
+			inference = append(inference, call)
+		}
+	}
+	calls = inference
 	if len(calls) == 0 {
 		t.Fatalf("no %s calls recorded", method)
 	}
@@ -1049,8 +1061,8 @@ func TestExecuteStreamExceedsMaxResponseBytes(t *testing.T) {
 
 func TestExecuteStreamWatchdogClosesIdleUpstream(t *testing.T) {
 	// F6: the wire format has no deadline field, so an idle upstream would
-	// block stream_read forever; the request-timeout watchdog must close the
-	// upstream (unblocking the read) and fail with a timeout-class error.
+	// block stream_read forever; the stream-idle-timeout watchdog must close
+	// the upstream (unblocking the read) and fail with a timeout-class error.
 	f := &fakeCaller{}
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
@@ -1072,7 +1084,7 @@ func TestExecuteStreamWatchdogClosesIdleUpstream(t *testing.T) {
 		}
 	})
 	if _, err := m.HandleCall("plugin.register",
-		lifecycleRequestBody(testValidYAML+"request-timeout: 50ms\n")); err != nil {
+		lifecycleRequestBody(testValidYAML+"request-timeout: 50ms\nstream-idle-timeout: 50ms\n")); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	resp, err := m.HandleCall("executor.execute_stream",
@@ -1398,7 +1410,7 @@ func TestConvertNonStreamSeamBranches(t *testing.T) {
 	if got := catalog.JoinUpstreamURL("https://gw.test/", "/v1/responses"); got != "https://gw.test/v1/responses" {
 		t.Fatalf("url join = %q", got)
 	}
-	if got := upstreamAuthHeaders(catalog.RouteChatCompletions, "k", "session"); got.Get("Authorization") != "Bearer k" || got.Get("x-opencode-session") != "session" {
+	if got := upstreamAuthHeaders(catalog.RouteChatCompletions, "k", "", "session"); got.Get("Authorization") != "Bearer k" || got.Get("x-opencode-session") != "session" {
 		t.Fatalf("bearer headers = %v", got)
 	}
 	// Adapters own status classification uniformly (§7).

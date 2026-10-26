@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"opencode-go-cpa/internal/adapter/chatcompletions"
+	"opencode-go-cpa/internal/adapter/gemini"
 	"opencode-go-cpa/internal/adapter/messages"
 	"opencode-go-cpa/internal/adapter/responses"
 	"opencode-go-cpa/internal/adapter/shared"
@@ -45,6 +46,7 @@ type resolvedExecution struct {
 	cfg         config.Config
 	rec         catalog.ModelRecord
 	key         string
+	orgID       string
 	tools       shared.ResponseTools
 	passThrough bool
 }
@@ -60,6 +62,11 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 		return nil, classEnvelope(&errclass.Error{Class: errclass.ClassAuth, Message: "selected auth provider is not opencode-go"})
 	}
 	key := strings.TrimSpace(req.AuthAttributes["api_key"])
+	if key == "" {
+		// OAuth-managed records carry an access token instead of an API key.
+		key = strings.TrimSpace(req.AuthAttributes["access_token"])
+	}
+	orgID := strings.TrimSpace(req.AuthAttributes["org_id"])
 	debugTrace("executor auth model=%s auth_id=%s provider=%s attr_api_key_present=%t attr_count=%d storage_json_bytes=%d", req.Model, req.AuthID, req.AuthProvider, key != "", len(req.AuthAttributes), len(req.StorageJSON))
 	if key == "" {
 		return nil, classEnvelope(&errclass.Error{Class: errclass.ClassAuth, Message: "selected auth has no api key"})
@@ -113,7 +120,7 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 	}
 	rt := shared.NewResponseTools()
 	rt.SetReasoningShape(string(rec.ReasoningShape))
-	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *rt, passThrough: passThrough}, nil
+	return &resolvedExecution{cfg: cfg, rec: rec, key: key, orgID: orgID, tools: *rt, passThrough: passThrough}, nil
 }
 
 // upstreamMetadata reports the upstream leg of this execution to the host
@@ -169,20 +176,38 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	}
 	m.logLosses(res)
 
-	url := catalog.JoinUpstreamURL(res.cfg.BaseURL, res.rec.EndpointPath)
-	debugTrace("executor resolved public_model=%s upstream_model=%s route=%s url=%s key_count=%d", req.Model, res.rec.UpstreamID, res.rec.Protocol, url, len(res.cfg.APIKeys))
-	debugTrace("executor sending non-stream url=%s body_len=%d", url, len(upstreamBody))
+	target := upstreamURL(res, false)
+	debugTrace("executor resolved public_model=%s upstream_model=%s route=%s url=%s key_count=%d", req.Model, res.rec.UpstreamID, res.rec.Protocol, target, len(res.cfg.APIKeys))
+	debugTrace("executor sending non-stream url=%s body_len=%d", target, len(upstreamBody))
 	ctx, cancel := context.WithTimeout(context.Background(), res.cfg.RequestTimeout)
 	defer cancel()
-	resp, err := m.bridge.Do(ctx, pluginapi.HTTPRequest{
-		Method:  http.MethodPost,
-		URL:     url,
-		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
-		Body:    upstreamBody,
-	})
-	if err != nil {
-		debugTrace("executor non-stream network error: %v", err)
-		return classEnvelope(errclass.FromNetwork(err)), nil
+	sendBody := upstreamBody
+	var resp pluginapi.HTTPResponse
+	for attempt := 0; ; attempt++ {
+		var err error
+		resp, err = m.bridge.Do(ctx, pluginapi.HTTPRequest{
+			Method:  http.MethodPost,
+			URL:     target,
+			Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, res.orgID, sessionID),
+			Body:    sendBody,
+		})
+		if err != nil {
+			debugTrace("executor non-stream network error: %v", err)
+			return classEnvelope(errclass.FromNetwork(err)), nil
+		}
+		if attempt == 0 && retryableCallIDRejection(res.rec.Protocol, req.SourceFormat, resp.StatusCode, resp.Body) {
+			// DeepSeek-style thinking mode can reject a replayed call id it
+			// cannot pair with reasoning. Retrying once with normalized ids
+			// fixes that case without rewriting ids when they are accepted
+			// (normalized ids are deterministic, so the client's next replay
+			// maps to the same values).
+			if normalized, nerr := shared.NormalizeResponsesCallIDs(sendBody); nerr == nil && string(normalized) != string(sendBody) {
+				debugTrace("executor retrying with normalized call ids after status=%d", resp.StatusCode)
+				sendBody = normalized
+				continue
+			}
+		}
+		break
 	}
 	debugTrace("executor received non-stream status=%d body_len=%d", resp.StatusCode, len(resp.Body))
 	if resp.StatusCode >= 400 {
@@ -203,6 +228,42 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	return okEnvelope(pluginapi.ExecutorResponse{Payload: converted, Headers: resp.Headers, Metadata: upstreamMetadata(res)}), nil
 }
 
+// readStreamErrorBody drains a failed stream's error body so the client sees
+// the upstream message instead of an empty 4xx. The watchdog covers a host
+// that never closes the stream.
+func (m *Manager) readStreamErrorBody(id string, timeout time.Duration) []byte {
+	if id == "" || m.bridge == nil {
+		return nil
+	}
+	watchdog := time.AfterFunc(timeout, func() {
+		_ = m.bridge.StreamClose(id)
+	})
+	defer watchdog.Stop()
+	body, _, _, _ := m.bridge.StreamRead(id)
+	_ = m.bridge.StreamClose(id)
+	return body
+}
+
+// retryableCallIDRejection reports whether an upstream 400 is the thinking-mode
+// replayed-call-id rejection that normalized ids can fix. Only the Responses
+// route has call ids to rewrite, and only a 400 qualifies: auth, quota and
+// model errors must fall through unchanged so key cooldown still works.
+func retryableCallIDRejection(route catalog.Route, sourceFormat string, status int, body []byte) bool {
+	if route != catalog.RouteResponses || status != http.StatusBadRequest {
+		return false
+	}
+	switch sourceFormat {
+	case "openai-response", "openai", "claude":
+	default:
+		return false
+	}
+	text := strings.ToLower(string(body))
+	if !strings.Contains(text, "reasoning_text") && !strings.Contains(text, "thinking mode") {
+		return false
+	}
+	return strings.Contains(text, "must be passed back") || strings.Contains(text, "reasoning")
+}
+
 func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat string, sourceBody []byte, ts *pluginapi.ThinkingSupport, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
 	switch route {
 	case catalog.RouteChatCompletions:
@@ -211,17 +272,33 @@ func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat strin
 		return messages.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts, tools...)
 	case catalog.RouteResponses:
 		return responses.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts, tools...)
+	case catalog.RouteGemini:
+		return gemini.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts, tools...)
 	}
 	return nil, errclass.Translation("unsupported route")
 }
 
-func upstreamAuthHeaders(route catalog.Route, key, sessionID string) http.Header {
+// upstreamURL joins base-url with the record's endpoint. Gemini carries the
+// model and action in the path, so its URL is assembled by the adapter.
+func upstreamURL(res *resolvedExecution, stream bool) string {
+	joined := catalog.JoinUpstreamURL(res.cfg.BaseURL, res.rec.EndpointPath)
+	if res.rec.Protocol == catalog.RouteGemini {
+		return gemini.UpstreamURL(joined, res.rec.UpstreamID, stream)
+	}
+	return joined
+}
+
+func upstreamAuthHeaders(route catalog.Route, key, orgID, sessionID string) http.Header {
 	var h http.Header
 	if route == catalog.RouteMessages {
 		h = messages.AuthHeaders(key)
 	} else {
-		// Chat Completions and Responses endpoints are OpenAI-style bearer.
+		// Chat Completions, Responses and Gemini endpoints are bearer-based.
 		h = chatcompletions.AuthHeaders(key)
+	}
+	if orgID != "" {
+		// Console OAuth credentials are scoped to one workspace.
+		h.Set("x-opencode-org-id", orgID)
 	}
 	h.Set("x-opencode-session", sessionID)
 	return h
@@ -372,6 +449,8 @@ func convertNonStream(route catalog.Route, sourceFormat string, status int, body
 		return messages.ConvertNonStreamResponse(sourceFormat, status, body, tools...)
 	case catalog.RouteResponses:
 		return responses.ConvertNonStreamResponse(sourceFormat, status, body, tools...)
+	case catalog.RouteGemini:
+		return gemini.ConvertNonStreamResponse(sourceFormat, status, body, tools...)
 	}
 	return nil, errclass.Translation("unsupported route")
 }
@@ -403,6 +482,8 @@ func newStreamConverter(route catalog.Route, sourceFormat string, tools ...*shar
 		return messages.NewStreamConverter(sourceFormat, tools...)
 	case catalog.RouteResponses:
 		return responses.NewStreamConverter(sourceFormat, tools...)
+	case catalog.RouteGemini:
+		return gemini.NewStreamConverter(sourceFormat, tools...)
 	}
 	return chatcompletions.NewStreamConverter(sourceFormat, tools...)
 }
@@ -441,29 +522,37 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 	}
 	m.logLosses(res)
 
-	url := catalog.JoinUpstreamURL(res.cfg.BaseURL, res.rec.EndpointPath)
-	debugTrace("executor sending stream url=%s body_len=%d", url, len(upstreamBody))
+	target := upstreamURL(res, true)
+	debugTrace("executor sending stream url=%s body_len=%d", target, len(upstreamBody))
 	ctx, cancel := context.WithTimeout(context.Background(), res.cfg.RequestTimeout)
 	defer cancel()
-	st, _, id, err := m.bridge.DoStream(ctx, pluginapi.HTTPRequest{
-		Method:  http.MethodPost,
-		URL:     url,
-		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
-		Body:    upstreamBody,
-	})
-	debugTrace("executor stream DoStream status=%d upstreamID=%s err=%v", st, id, err)
-	if err != nil {
-		return classEnvelope(errclass.FromNetwork(err)), nil
-	}
-	if st >= 400 {
-		var body []byte
-		if id != "" {
-			watchdog := time.AfterFunc(res.cfg.RequestTimeout, func() {
-				_ = m.bridge.StreamClose(id)
-			})
-			body, _, _, _ = m.bridge.StreamRead(id)
-			watchdog.Stop()
-			_ = m.bridge.StreamClose(id)
+	sendBody := upstreamBody
+	var (
+		st  int
+		id  string
+		err error
+	)
+	for attempt := 0; ; attempt++ {
+		st, _, id, err = m.bridge.DoStream(ctx, pluginapi.HTTPRequest{
+			Method:  http.MethodPost,
+			URL:     target,
+			Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, res.orgID, sessionID),
+			Body:    sendBody,
+		})
+		debugTrace("executor stream DoStream status=%d upstreamID=%s err=%v attempt=%d", st, id, err, attempt)
+		if err != nil {
+			return classEnvelope(errclass.FromNetwork(err)), nil
+		}
+		if st < 400 {
+			break
+		}
+		body := m.readStreamErrorBody(id, res.cfg.RequestTimeout)
+		if attempt == 0 && retryableCallIDRejection(res.rec.Protocol, req.SourceFormat, st, body) {
+			if normalized, nerr := shared.NormalizeResponsesCallIDs(sendBody); nerr == nil && string(normalized) != string(sendBody) {
+				debugTrace("executor stream retrying with normalized call ids after status=%d", st)
+				sendBody = normalized
+				continue
+			}
 		}
 		return classEnvelope(shared.UpstreamStatusError(st, body)), nil
 	}
@@ -491,17 +580,20 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 	}
 	defer closeStreams("")
 
-	var aborted atomic.Bool
-	watchdog := time.AfterFunc(res.cfg.RequestTimeout, func() {
+	var timedOut atomic.Bool
+	// The watchdog measures IDLE time between chunks, not total duration: a
+	// long answer that keeps producing data is never cut, while a stalled
+	// upstream still gets closed and surfaced as an error.
+	idleWatchdog := time.AfterFunc(res.cfg.StreamIdleTimeout, func() {
 		defer func() {
 			if r := recover(); r != nil && m.bridge != nil {
 				_ = m.bridge.Log("error", "stream watchdog panicked", nil)
 			}
 		}()
-		aborted.Store(true)
+		timedOut.Store(true)
 		_ = m.bridge.StreamClose(upstreamID)
 	})
-	defer watchdog.Stop()
+	defer idleWatchdog.Stop()
 
 	conv := newStreamConverter(res.rec.Protocol, sourceFormat, &res.tools)
 	// Mirror capture for streaming: the same chunks that feed the client
@@ -516,9 +608,11 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 	for {
 		payload, readErrMsg, closed, err := m.bridge.StreamRead(upstreamID)
 		debugTrace("executor stream read chunk_len=%d closed=%t readErrMsg=%q err=%v", len(payload), closed, readErrMsg, err)
+		// Any read return means the upstream is alive; restart the idle clock.
+		idleWatchdog.Reset(res.cfg.StreamIdleTimeout)
 		upstreamClosed = closed
-		if aborted.Load() {
-			closeStreams(errclass.Redact("stream exceeded request-timeout"))
+		if timedOut.Load() {
+			closeStreams(errclass.Redact("stream exceeded stream-idle-timeout"))
 			return
 		}
 		if err != nil {

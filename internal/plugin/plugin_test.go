@@ -430,7 +430,7 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 		t.Fatalf("schema_version = %d, want %d", reg.SchemaVersion, pluginabi.SchemaVersion)
 	}
 	if reg.Metadata.Name != pluginName || reg.Metadata.Version != pluginVersion ||
-		len(reg.Metadata.ConfigFields) != 14 {
+		len(reg.Metadata.ConfigFields) != 17 {
 		t.Fatalf("metadata wrong: %+v", reg.Metadata)
 	}
 	if !reg.Capabilities.ModelProvider || !reg.Capabilities.AuthProvider {
@@ -438,8 +438,17 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 	}
 
 	calls := f.callsOf(pluginabi.MethodHostHTTPDo)
+	// Metadata enrichment may issue its own host.http.do in the background;
+	// only the catalog fetch is under test here.
+	var catalogCalls []capturedCall
+	for _, call := range calls {
+		if strings.Contains(string(call.payload), "/v1/models") {
+			catalogCalls = append(catalogCalls, call)
+		}
+	}
+	calls = catalogCalls
 	if len(calls) != 1 {
-		t.Fatalf("host.http.do calls = %d, want 1", len(calls))
+		t.Fatalf("catalog host.http.do calls = %d, want 1", len(calls))
 	}
 	var wire map[string]any
 	if err := json.Unmarshal(calls[0].payload, &wire); err != nil {
@@ -503,6 +512,9 @@ func TestRegistrationConfigFields(t *testing.T) {
 		{"protocol-endpoints", pluginapi.ConfigFieldTypeObject},
 		{"fallback-routes", pluginapi.ConfigFieldTypeArray},
 		{"request-timeout", pluginapi.ConfigFieldTypeString},
+		{"stream-idle-timeout", pluginapi.ConfigFieldTypeString},
+		{"catalog-cache-path", pluginapi.ConfigFieldTypeString},
+		{"metadata-url", pluginapi.ConfigFieldTypeString},
 		{"max-response-bytes", pluginapi.ConfigFieldTypeInteger},
 		{"allow-http", pluginapi.ConfigFieldTypeBoolean},
 	}
@@ -774,8 +786,17 @@ func TestRegisterRefreshesWithConfiguredBearer(t *testing.T) {
 		t.Fatalf("register rejected: %s", resp)
 	}
 	calls := f.callsOf(pluginabi.MethodHostHTTPDo)
+	// Metadata enrichment may issue its own host.http.do in the background;
+	// only the catalog fetch is under test here.
+	var catalogCalls []capturedCall
+	for _, call := range calls {
+		if strings.Contains(string(call.payload), "/v1/models") {
+			catalogCalls = append(catalogCalls, call)
+		}
+	}
+	calls = catalogCalls
 	if len(calls) != 1 {
-		t.Fatalf("host.http.do calls = %d, want 1", len(calls))
+		t.Fatalf("catalog host.http.do calls = %d, want 1", len(calls))
 	}
 	var wire map[string]any
 	if err := json.Unmarshal(calls[0].payload, &wire); err != nil {

@@ -27,7 +27,7 @@ const ProviderID = "opencode-go"
 // pluginName / pluginVersion are reported in registration metadata.
 const (
 	pluginName    = "opencode-go-cpa"
-	pluginVersion = "0.5.7"
+	pluginVersion = "0.6.0"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
@@ -64,6 +64,45 @@ func NewManager(bridge *HostBridge) *Manager {
 	return &Manager{bridge: bridge}
 }
 
+// authProvider snapshots the config so a login/refresh call never races a
+// reconfigure, and returns a provider wired to the host transport.
+func (m *Manager) authProvider() authProvider {
+	m.mu.RLock()
+	cfg := m.cfg
+	m.mu.RUnlock()
+	return authProvider{cfg: cfg, bridge: m.bridge}
+}
+
+// loadMetadata fetches models.dev limits/modalities in the background and
+// applies them to the current snapshot. Upstream catalog values always win;
+// metadata only fills what the upstream omitted.
+func (m *Manager) loadMetadata(mgr *catalog.Manager, cfg config.Config, client catalog.HostClient) {
+	if mgr == nil || client == nil || strings.TrimSpace(cfg.MetadataURL) == "" {
+		return
+	}
+	// Host transports can panic on unexpected URLs (test doubles, older
+	// hosts); metadata is optional enrichment and must never take the
+	// process down.
+	defer func() {
+		if r := recover(); r != nil {
+			debugTrace("catalog metadata fetch recovered from panic")
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), metadataFetchTimeout)
+	defer cancel()
+	meta, err := catalog.FetchMetadata(ctx, client, cfg.MetadataURL)
+	if err != nil {
+		debugTrace("catalog metadata fetch failed: %v", err)
+		return
+	}
+	mgr.SetMetadata(meta)
+	debugTrace("catalog metadata applied models=%d", len(meta))
+}
+
+// metadataFetchTimeout bounds the optional models.dev call; the upstream
+// catalog refresh is never blocked on it.
+const metadataFetchTimeout = 30 * time.Second
+
 // HandleCall dispatches one RPC method and returns envelope bytes. Handler
 // failures travel inside the envelope; a recovered panic becomes a
 // "plugin_error" envelope so the host process never dies with us.
@@ -95,10 +134,8 @@ func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err er
 		if json.Unmarshal(request, &req) != nil {
 			return ErrEnvelope("invalid_request", "malformed auth parse request body"), nil
 		}
-		m.mu.RLock()
-		cfg := m.cfg
-		m.mu.RUnlock()
-		resp, err := (authProvider{cfg: cfg}).ParseAuth(context.Background(), req)
+		provider := m.authProvider()
+		resp, err := provider.ParseAuth(context.Background(), req)
 		if err != nil {
 			return ErrEnvelope("auth_failure", err.Error()), nil
 		}
@@ -111,21 +148,27 @@ func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err er
 		if json.Unmarshal(request, &req) != nil {
 			return ErrEnvelope("invalid_request", "malformed auth login request body"), nil
 		}
-		_, err := (authProvider{}).StartLogin(context.Background(), req.AuthLoginStartRequest)
-		return ErrEnvelope("unsupported", err.Error()), nil
+		resp, err := m.authProvider().StartLogin(context.Background(), req.AuthLoginStartRequest)
+		if err != nil {
+			return ErrEnvelope("auth_failure", err.Error()), nil
+		}
+		return okEnvelope(resp), nil
 	case pluginabi.MethodAuthLoginPoll:
 		var req struct{ pluginapi.AuthLoginPollRequest }
 		if json.Unmarshal(request, &req) != nil {
 			return ErrEnvelope("invalid_request", "malformed auth poll request body"), nil
 		}
-		_, err := (authProvider{}).PollLogin(context.Background(), req.AuthLoginPollRequest)
-		return ErrEnvelope("unsupported", err.Error()), nil
+		resp, err := m.authProvider().PollLogin(context.Background(), req.AuthLoginPollRequest)
+		if err != nil {
+			return ErrEnvelope("auth_failure", err.Error()), nil
+		}
+		return okEnvelope(resp), nil
 	case pluginabi.MethodAuthRefresh:
 		var req struct{ pluginapi.AuthRefreshRequest }
 		if json.Unmarshal(request, &req) != nil {
 			return ErrEnvelope("invalid_request", "malformed auth refresh request body"), nil
 		}
-		resp, err := (authProvider{}).RefreshAuth(context.Background(), req.AuthRefreshRequest)
+		resp, err := m.authProvider().RefreshAuth(context.Background(), req.AuthRefreshRequest)
 		if err != nil {
 			return ErrEnvelope("auth_failure", err.Error()), nil
 		}
@@ -222,7 +265,7 @@ func pluginConfigFields() []pluginapi.ConfigField {
 		{
 			Name:        "protocols",
 			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Protocol enable/disable switches (`chat-completions: bool`, `messages: bool`, `responses: bool`).",
+			Description: "Protocol enable/disable switches (`chat-completions: bool`, `messages: bool`, `responses: bool`, `gemini: bool`). Gemini only affects models routed to the /google/v1beta endpoint.",
 		},
 		{
 			Name:        "route-overrides",
@@ -248,6 +291,21 @@ func pluginConfigFields() []pluginapi.ConfigField {
 			Name:        "request-timeout",
 			Type:        pluginapi.ConfigFieldTypeString,
 			Description: "Upstream HTTP request timeout (default: 5m).",
+		},
+		{
+			Name:        "stream-idle-timeout",
+			Type:        pluginapi.ConfigFieldTypeString,
+			Description: "Max silence between stream chunks before the stream is closed (default: 5m). Total duration is still bounded by request-timeout.",
+		},
+		{
+			Name:        "catalog-cache-path",
+			Type:        pluginapi.ConfigFieldTypeString,
+			Description: "Absolute path of the last-good catalog snapshot (default: <user-cache>/opencode-go/catalog.json). Serves models when the upstream catalog is down at startup.",
+		},
+		{
+			Name:        "metadata-url",
+			Type:        pluginapi.ConfigFieldTypeString,
+			Description: "models.dev-style metadata feed used to fill limits, modalities and thinking levels the upstream omits (default: https://models.opencode.ai/api.json).",
 		},
 		{
 			Name:        "max-response-bytes",
@@ -303,7 +361,7 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	debugTrace("lifecycle config_loaded key_count=%d prefix_enabled=%t prefix=%s", len(cfg.APIKeys), cfg.ModelPrefix.Enabled, cfg.ModelPrefix.Value)
 	ctx, cancel := context.WithTimeout(context.Background(), registerRefreshTimeout)
 	defer cancel()
-	if err := m.materializeAuthRecords(ctx, cfg); err != nil {
+	if err := m.reconcileAuthRecords(ctx, cfg); err != nil {
 		return ErrEnvelope("auth_materialization_failed", err.Error()), nil
 	}
 	// A nil *HostBridge must not enter the interface as a typed nil, or
@@ -313,6 +371,15 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 		client = m.bridge
 	}
 	mgr := catalog.New(cfg, client)
+	// Serve the last good snapshot immediately: a cold start during an
+	// upstream catalog outage must not expose an empty model list.
+	mgr.SetCachePath(cfg.CatalogCachePath)
+	if mgr.Restore() {
+		debugTrace("lifecycle catalog restored model_count=%d", len(mgr.Models()))
+	}
+	// models.dev metadata is large and optional: fetch it off the
+	// registration path so a slow models.dev never delays startup.
+	go m.loadMetadata(mgr, cfg, client)
 	refreshErr := refreshOnce(context.Background(), mgr, m.bridge, registerRefreshTimeout, cfg)
 	debugTrace("lifecycle refresh_complete model_count=%d refresh_error=%t", len(mgr.Models()), refreshErr != nil)
 
@@ -349,11 +416,11 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	return registrationEnvelope(), nil
 }
 
-// materializeAuthRecords makes CPA-visible auth files idempotently. Existing
-// records are discovered through CPA so their host-managed metadata is never
-// overwritten. The full key digest is non-secret and independent of config
-// ordering. The host ABI has no delete/disable callback, so removed keys remain
-// stale records and are not claimed as removed.
+// materializeAuthRecords creates the canonical record for every configured
+// key. Existing records are discovered through CPA so their host-managed
+// metadata is never overwritten. The full key digest is non-secret and
+// independent of config ordering. Removal of records whose key left the config
+// is handled by reconcileAuthRecords, which proves ownership from the file.
 func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config) error {
 	if m.bridge == nil {
 		return nil
