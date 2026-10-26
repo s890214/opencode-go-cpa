@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -1105,5 +1107,39 @@ func TestGeminiFamilyHonoursProtocolSwitch(t *testing.T) {
 	}
 	if !strings.Contains(reason, "gemini") {
 		t.Fatalf("diagnostic = %q, want a gemini protocol note", reason)
+	}
+}
+
+func TestCatalogCachePersistsAndRestores(t *testing.T) {
+	cfg := testCfg()
+	cfg.Protocols.Gemini = true
+	fc := &fakeClient{}
+	fc.set(pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[{"id":"deepseek-v4-pro"},{"id":"gemini-4-argon"}]}`)}, nil)
+	m := newManager(cfg, fc)
+	// Nested, not-yet-existing directory: persistence has to create it.
+	cache := filepath.Join(t.TempDir(), "nested", "opencode-go", "catalog.json")
+	m.SetCachePath(cache)
+	mustRefresh(t, m)
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatalf("cache file not written: %v", err)
+	}
+
+	// A cold start with a failing upstream serves the snapshot instead of
+	// an empty model list.
+	failing := &fakeClient{}
+	failing.set(pluginapi.HTTPResponse{StatusCode: 502, Body: []byte(`{"error":"down"}`)}, nil)
+	cold := newManager(cfg, failing)
+	cold.SetCachePath(cache)
+	if !cold.Restore() {
+		t.Fatalf("Restore() = false, want the persisted snapshot")
+	}
+	if len(cold.Models()) != 2 {
+		t.Fatalf("restored models = %d, want 2", len(cold.Models()))
+	}
+	if err := cold.Refresh(context.Background(), "test"); err == nil {
+		t.Fatalf("refresh should report the upstream failure")
+	}
+	if len(cold.Models()) != 2 {
+		t.Fatalf("failed refresh dropped the restored snapshot: %d models", len(cold.Models()))
 	}
 }

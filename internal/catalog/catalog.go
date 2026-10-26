@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -705,6 +706,9 @@ func (m *Manager) persistLocked(entries []rawModel) {
 	}
 	payload, err := json.Marshal(catalogCache{FetchedAt: time.Now().UTC(), Entries: entries})
 	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(m.cachePath), 0o700); err != nil {
 		return
 	}
 	tmp := m.cachePath + ".tmp"
