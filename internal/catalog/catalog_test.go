@@ -1052,3 +1052,58 @@ func TestFallbackRoutesNilUsesBuiltinTable(t *testing.T) {
 		t.Errorf("nil fallback-routes route = %q, want chat-completions", rec.Protocol)
 	}
 }
+
+func TestGeminiFamilyRoutesToGenerateContent(t *testing.T) {
+	cfg := testCfg()
+	cfg.Protocols.Gemini = true
+	fc := &fakeClient{}
+	fc.set(pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[
+		{"id":"gemini-4-argon"},
+		{"id":"gemini-4-argon-contributor"},
+		{"id":"deepseek-v4-pro"}
+	]}`)}, nil)
+	m := newManager(cfg, fc)
+	mustRefresh(t, m)
+
+	rec := findModel(t, m.Models(), "gemini-4-argon")
+	if rec.Protocol != RouteGemini {
+		t.Fatalf("protocol = %q, want gemini", rec.Protocol)
+	}
+	if rec.EndpointPath != "/google/v1beta/models" {
+		t.Fatalf("endpoint = %q, want /google/v1beta/models", rec.EndpointPath)
+	}
+	for _, mo := range m.Models() {
+		if mo.UpstreamID == "gemini-4-argon-contributor" {
+			t.Fatalf("retired model must not be routable: %+v", mo)
+		}
+	}
+	var retired bool
+	for _, u := range m.Unsupported() {
+		if u.UpstreamID == "gemini-4-argon-contributor" && strings.Contains(u.Reason, "retired") {
+			retired = true
+		}
+	}
+	if !retired {
+		t.Fatalf("retired model missing from diagnostics: %+v", m.Unsupported())
+	}
+}
+
+func TestGeminiFamilyHonoursProtocolSwitch(t *testing.T) {
+	cfg := testCfg() // Gemini defaults to false in this fixture
+	fc := &fakeClient{}
+	fc.set(pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[{"id":"gemini-4-argon"}]}`)}, nil)
+	m := newManager(cfg, fc)
+	mustRefresh(t, m)
+	if len(m.Models()) != 0 {
+		t.Fatalf("gemini models must be excluded when protocols.gemini is off: %+v", m.Models())
+	}
+	var reason string
+	for _, u := range m.Unsupported() {
+		if u.UpstreamID == "gemini-4-argon" {
+			reason = u.Reason
+		}
+	}
+	if !strings.Contains(reason, "gemini") {
+		t.Fatalf("diagnostic = %q, want a gemini protocol note", reason)
+	}
+}

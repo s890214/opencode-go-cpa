@@ -573,7 +573,21 @@ func (m *Manager) resolve(e rawModel) (Route, string, bool, string) {
 	if route, ok := m.fallbackRoute(e.ID); ok {
 		return route, "", true, ""
 	}
+	if isGeminiFamily(e.ID) {
+		return RouteGemini, "", true, ""
+	}
 	return "", "", false, ""
+}
+
+// isGeminiFamily reports whether an upstream id belongs to the Gemini
+// endpoint family. Gemini is not a heuristic: generateContent carries the
+// model and action in the path and answers a different wire shape, so these
+// ids always route to RouteGemini regardless of the configured
+// fallback-routes table (an explicit `models` entry still wins, and the
+// protocols.gemini switch can disable the family).
+func isGeminiFamily(upstreamID string) bool {
+	lower := strings.ToLower(strings.TrimSpace(upstreamID))
+	return strings.HasPrefix(lower, "gemini")
 }
 
 // JoinUpstreamURL joins the configured base-url onto an endpoint path and
