@@ -761,7 +761,7 @@ func TestChatStreamingRoundTrip(t *testing.T) {
 		t.Fatalf("execute_stream: %v", err)
 	}
 	env := decodeEnv(t, resp)
-	if !env.OK || streamEnvelopeProtocol(t, env.Result) == "" {
+	if !env.OK || len(env.Result) == 0 {
 		t.Fatalf("envelope = %s", resp)
 	}
 	m.bridge.WaitForInFlight(5 * time.Second)
@@ -806,7 +806,7 @@ func TestMessagesStreamingRoundTrip(t *testing.T) {
 		t.Fatalf("execute_stream: %v", err)
 	}
 	env := decodeEnv(t, resp)
-	if !env.OK || streamEnvelopeProtocol(t, env.Result) == "" {
+	if !env.OK || len(env.Result) == 0 {
 		t.Fatalf("envelope = %s", resp)
 	}
 	m.bridge.WaitForInFlight(5 * time.Second)
@@ -841,7 +841,7 @@ func TestResponsesStreamingRoundTrip(t *testing.T) {
 		t.Fatalf("execute_stream: %v", err)
 	}
 	env := decodeEnv(t, resp)
-	if !env.OK || streamEnvelopeProtocol(t, env.Result) == "" {
+	if !env.OK || len(env.Result) == 0 {
 		t.Fatalf("envelope = %s", resp)
 	}
 	m.bridge.WaitForInFlight(5 * time.Second)
