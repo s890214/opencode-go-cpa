@@ -47,7 +47,6 @@ type resolvedExecution struct {
 	rec         catalog.ModelRecord
 	key         string
 	tools       shared.ResponseTools
-	passThrough bool
 }
 
 // resolveExecution resolves the requested model against the snapshot and
@@ -83,12 +82,10 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 	// features (web_search, custom tools) intact for Responses clients.
 	// The protocol switches gate this path exactly like the catalog build,
 	// so a disabled protocol cannot re-enter through a preference entry.
-	var passThrough bool
 	if sourceRoute, ok := routeForSourceFormat(req.SourceFormat); ok && cfg.Protocols.Enabled(string(sourceRoute)) {
 		for _, supported := range rec.SupportedProtocols {
 			if supported == sourceRoute {
 				rec.Protocol = sourceRoute
-				passThrough = true
 				// The endpoint must follow the protocol actually used, or a
 				// Responses body gets posted to the Chat Completions path.
 				// EndpointPaths already resolved every supported protocol
@@ -114,21 +111,7 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 	}
 	rt := shared.NewResponseTools()
 	rt.SetReasoningShape(string(rec.ReasoningShape))
-	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *rt, passThrough: passThrough}, nil
-}
-
-// upstreamMetadata reports the upstream leg of this execution to the host
-// through the executor response metadata bag (never in client-visible headers).
-func upstreamMetadata(res *resolvedExecution) map[string]any {
-	metadata := map[string]any{}
-	if res == nil {
-		return metadata
-	}
-	if protocol := strings.TrimSpace(string(res.rec.Protocol)); protocol != "" {
-		metadata["upstream_protocol"] = protocol
-	}
-	metadata["upstream_passthrough"] = res.passThrough
-	return metadata
+	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *rt}, nil
 }
 
 // routeForSourceFormat maps the inbound client protocol to an upstream route.
@@ -219,7 +202,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
-	return okEnvelope(pluginapi.ExecutorResponse{Payload: converted, Headers: resp.Headers, Metadata: upstreamMetadata(res)}), nil
+	return okEnvelope(pluginapi.ExecutorResponse{Payload: converted, Headers: resp.Headers}), nil
 }
 
 // readStreamErrorBody drains a failed stream's error body so the client sees
@@ -557,7 +540,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		}
 		m.pumpStream(downID, id, res, req.SourceFormat)
 	}()
-	return okEnvelope(map[string]any{"metadata": upstreamMetadata(res)}), nil
+	return okEnvelope(struct{}{}), nil
 }
 
 func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string) {
