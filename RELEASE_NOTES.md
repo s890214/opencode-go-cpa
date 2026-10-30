@@ -1,3 +1,14 @@
+## v0.6.5 — echo the host execution id on host calls
+
+### Fixes
+
+- Host calls (`host.http.do`, `host.http.do_stream`) now carry the execution id
+  the host issued for the running request. The host uses it to tie the proxied
+  upstream request back to the execution, which is how per-request reporting
+  (upstream protocol and pass-through in the usage panel) stays accurate
+  without the plugin describing its own upstream leg. Requests without a host
+  id behave exactly as before.
+
 ## v0.6.4 — stop reporting the upstream protocol
 
 ### Changes

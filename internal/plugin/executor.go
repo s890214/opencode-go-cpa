@@ -38,6 +38,10 @@ import (
 type executorRequest struct {
 	pluginapi.ExecutorRequest
 	StreamID string `json:"stream_id,omitempty"`
+	// HostCallbackID is the host-issued id of this execution. Echoing it back on
+	// host calls lets the host tie them to the execution (and its per-request
+	// bookkeeping) without the plugin describing anything about the upstream leg.
+	HostCallbackID string `json:"host_callback_id,omitempty"`
 }
 
 // resolvedExecution carries everything both execution paths need after
@@ -156,7 +160,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	target := upstreamURL(res, false)
 	debugTrace("executor resolved public_model=%s upstream_model=%s route=%s url=%s key_count=%d", req.Model, res.rec.UpstreamID, res.rec.Protocol, target, len(res.cfg.APIKeys))
 	debugTrace("executor sending non-stream url=%s body_len=%d", target, len(upstreamBody))
-	ctx, cancel := context.WithTimeout(context.Background(), res.cfg.RequestTimeout)
+	ctx, cancel := context.WithTimeout(withHostCallbackID(context.Background(), req.HostCallbackID), res.cfg.RequestTimeout)
 	defer cancel()
 	sendBody := upstreamBody
 	var resp pluginapi.HTTPResponse
@@ -497,7 +501,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 
 	target := upstreamURL(res, true)
 	debugTrace("executor sending stream url=%s body_len=%d", target, len(upstreamBody))
-	ctx, cancel := context.WithTimeout(context.Background(), res.cfg.RequestTimeout)
+	ctx, cancel := context.WithTimeout(withHostCallbackID(context.Background(), req.HostCallbackID), res.cfg.RequestTimeout)
 	defer cancel()
 	sendBody := upstreamBody
 	var (

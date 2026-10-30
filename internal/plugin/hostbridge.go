@@ -48,6 +48,29 @@ type hostHTTPReq struct {
 	URL     string      `json:"url"`
 	Headers http.Header `json:"headers"`
 	Body    []byte      `json:"body"`
+	// HostCallbackID echoes the id the host issued for the current execution so
+	// the host can attribute this call to it.
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+// hostCallbackIDKey carries the host-issued execution id across the plugin's
+// own context boundaries (the bridge calls run on a timeout-wrapped context).
+type hostCallbackIDKey struct{}
+
+func withHostCallbackID(ctx context.Context, id string) context.Context {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, hostCallbackIDKey{}, id)
+}
+
+func hostCallbackIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(hostCallbackIDKey{}).(string)
+	return id
 }
 
 type hostAuthListResponse struct {
@@ -289,6 +312,7 @@ func (b *HostBridge) invoke(ctx context.Context, method string, payload any, wha
 func (b *HostBridge) Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
 	env, err := b.invoke(ctx, pluginabi.MethodHostHTTPDo, hostHTTPReq{
 		Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
+		HostCallbackID: hostCallbackIDFromContext(ctx),
 	}, "host http do")
 	if err != nil {
 		return pluginapi.HTTPResponse{}, err
@@ -312,6 +336,7 @@ func (b *HostBridge) Do(ctx context.Context, req pluginapi.HTTPRequest) (plugina
 func (b *HostBridge) DoStream(ctx context.Context, req pluginapi.HTTPRequest) (statusCode int, headers http.Header, upstreamStreamID string, err error) {
 	payloadBytes, _ := json.Marshal(hostHTTPReq{
 		Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
+		HostCallbackID: hostCallbackIDFromContext(ctx),
 	})
 	raw, late, err := b.callWithTimeoutResult(ctx, pluginabi.MethodHostHTTPDoStream, payloadBytes, streamTimeoutGrace, b.closeLateStream)
 	if late {
