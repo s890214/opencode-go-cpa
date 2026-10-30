@@ -1,3 +1,13 @@
+## v0.6.4 — stop reporting the upstream protocol
+
+### Changes
+
+- The plugin no longer describes its own upstream leg (protocol and
+  pass-through) in executor response metadata. The host derives both from the
+  request the executor actually sent, so the value is the same for every
+  executor and cannot drift from what was really on the wire. Nothing changes
+  in the panel or in routing; executions behave exactly as in v0.6.3.
+
 ## v0.6.3 — plain readable credential file names
 
 ### Fixes
