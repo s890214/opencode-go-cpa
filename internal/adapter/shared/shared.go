@@ -1176,6 +1176,7 @@ type ResponsesResult struct {
 type RespTool struct {
 	Type         string          `json:"type"` // "function", "namespace", or a hosted tool
 	Name         string          `json:"name"`
+	Execution    string          `json:"execution,omitempty"`
 	Description  string          `json:"description,omitempty"`
 	Parameters   json.RawMessage `json:"parameters,omitempty"`
 	Tools        []RespTool      `json:"tools,omitempty"`
@@ -1255,6 +1256,8 @@ func (r *ResponsesRequest) DecodeInputItems() ([]RespItem, *errclass.Error) {
 type RespItem struct {
 	Type      string          `json:"type"`
 	ID        string          `json:"id,omitempty"`
+	Status    string          `json:"status,omitempty"`
+	Execution string          `json:"execution,omitempty"`
 	Role      string          `json:"role,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
 	CallID    string          `json:"call_id,omitempty"`
@@ -1271,6 +1274,33 @@ type RespItem struct {
 	} `json:"summary,omitempty"`
 	EncryptedContent string     `json:"encrypted_content,omitempty"`
 	Tools            []RespTool `json:"tools,omitempty"`
+}
+
+// UnmarshalJSON accepts the arguments field as either a JSON string (the
+// function_call shape) or a JSON object (the tool_search_call shape, where
+// the client sends structured search arguments). Every other field decodes
+// through the struct's own tags; a non-string value is kept verbatim as
+// compact JSON text so no argument content is lost at the boundary.
+func (i *RespItem) UnmarshalJSON(b []byte) error {
+	type plain RespItem
+	var aux struct {
+		*plain
+		Arguments json.RawMessage `json:"arguments,omitempty"`
+	}
+	aux.plain = (*plain)(i)
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	if !HasContent(aux.Arguments) {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(aux.Arguments, &s); err == nil {
+		i.Arguments = s
+		return nil
+	}
+	i.Arguments = string(aux.Arguments)
+	return nil
 }
 
 // CCFunction is one Chat Completions tool function definition (decode and
@@ -1814,6 +1844,12 @@ func (a *OutputAssembler) AppendReasoning(item RespItem) {
 // as custom_tool_call items with unwrapped input.
 func (a *OutputAssembler) AppendFunctionCall(callID, name, args string) {
 	id := a.tools.Identity(name)
+	if id.isToolSearch {
+		// The client asked for a tool_search; restore the native item type
+		// instead of leaking the Chat shim function name.
+		a.items = append(a.items, ToolSearchCallFromArgs(callID, args))
+		return
+	}
 	if id.isCustom {
 		a.items = append(a.items, RespItem{
 			Type: "custom_tool_call", CallID: callID, Name: id.name, Namespace: id.namespace, Input: UnwrapCustomToolInput(args),

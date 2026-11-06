@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"opencode-go-cpa/internal/errclass"
@@ -25,9 +26,10 @@ func DefaultReasoningStore() *reasoning.Store { return defaultReasoningStore }
 // isCustom marks tools originally declared as type "custom" so the
 // outbound path restores custom_tool_call items.
 type responseToolIdentity struct {
-	name      string
-	namespace string
-	isCustom  bool
+	name         string
+	namespace    string
+	isCustom     bool
+	isToolSearch bool
 }
 
 // ResponseTools tracks flattened namespace wire names to their original
@@ -35,10 +37,11 @@ type responseToolIdentity struct {
 // reasoning cache the request translators read back, and carries the reasoning
 // wire shape the target model expects.
 type ResponseTools struct {
-	names     map[string]responseToolIdentity
-	reasoning *reasoning.Store
-	shape     string
-	losses    []string
+	names      map[string]responseToolIdentity
+	reasoning  *reasoning.Store
+	shape      string
+	losses     []string
+	toolSearch string // wire name of the client tool_search shim, "" when absent
 }
 
 // NewResponseTools prepares an empty namespace registry bound to the
@@ -126,6 +129,69 @@ func (t *ResponseTools) IsCustom(name string) bool {
 		}
 	}
 	return false
+}
+
+// IsToolSearch reports whether a wire tool name is the client tool_search
+// shim registered for this conversion.
+func (t *ResponseTools) IsToolSearch(name string) bool {
+	if t != nil && t.names != nil {
+		if id, ok := t.names[name]; ok {
+			return id.isToolSearch
+		}
+	}
+	return false
+}
+
+// ToolSearchName returns the wire name the shim was registered under, ""
+// when the client declared no client-executed tool_search.
+func (t *ResponseTools) ToolSearchName() string {
+	if t == nil {
+		return ""
+	}
+	return t.toolSearch
+}
+
+// EnsureToolSearchShim returns the wire name of the client tool_search shim,
+// registering one when the client replayed a search call without declaring the
+// tool. It never returns "" so a replayed call always has a function name.
+func (t *ResponseTools) EnsureToolSearchShim() string {
+	if t == nil {
+		return ToolSearchShimName
+	}
+	if t.toolSearch != "" {
+		return t.toolSearch
+	}
+	taken := make(map[string]bool, len(t.names))
+	for name := range t.names {
+		taken[name] = true
+	}
+	return t.registerToolSearchShim(taken)
+}
+
+// registerToolSearchShim records the shim under a collision-free wire name:
+// "tool_search" unless the client already declared that name, then
+// tool_search_1, tool_search_2, ... in allocation order. taken carries the
+// names already claimed in this request and is updated in place.
+func (t *ResponseTools) registerToolSearchShim(taken map[string]bool) string {
+	if t.toolSearch != "" {
+		return t.toolSearch
+	}
+	name := ToolSearchShimName
+	for i := 1; taken[name]; i++ {
+		name = ToolSearchShimName + "_" + strconv.Itoa(i)
+	}
+	if taken != nil {
+		taken[name] = true
+	}
+	if t.names == nil {
+		t.names = make(map[string]responseToolIdentity)
+	}
+	// Identity keeps the protocol family name (tool_search) so nothing
+	// downstream mistakes the shim for a client-declared function; the
+	// wire name is the map key.
+	t.names[name] = responseToolIdentity{name: ToolSearchShimName, isToolSearch: true}
+	t.toolSearch = name
+	return name
 }
 
 // RegisterCustomTool records a tool that was forwarded verbatim on a native
@@ -229,18 +295,124 @@ func (t *ResponseTools) Normalize(r *ResponsesRequest, target string) ([]RespIte
 		return nil, eErr
 	}
 	var conv []RespItem
+	// Client-executed tool_search results carry the tools the search found:
+	// they are declared for this turn (and every turn that replays the item),
+	// and the item keeps the flattened declarations so the translated
+	// conversation can hand the callable names to the model as text.
+	taken := declaredToolNames(r.Tools)
+	var dynamic []RespTool
 	for _, item := range items {
 		if item.Type == "additional_tools" {
 			if item.Tools == nil {
 				return nil, errclass.Translation("additional_tools requires a tools array")
 			}
 			r.Tools = append(r.Tools, item.Tools...)
+			claimToolNames(taken, item.Tools)
 			continue
+		}
+		if item.Type == "tool_search_output" && len(item.Tools) > 0 {
+			flatOut, eErr := t.flattenDecls(item.Tools, target, taken)
+			if eErr != nil {
+				return nil, eErr
+			}
+			item.Tools = flatOut
+			dynamic = append(dynamic, flatOut...)
 		}
 		conv = append(conv, item)
 	}
+	flat, eErr := t.flattenDecls(r.Tools, target, taken)
+	if eErr != nil {
+		return nil, eErr
+	}
+	// A tool both declared by the client and discovered by search is one
+	// declaration, never two.
+	declared := make(map[string]bool, len(flat))
+	for _, tool := range flat {
+		declared[tool.Name] = true
+	}
+	for _, tool := range dynamic {
+		if declared[tool.Name] {
+			continue
+		}
+		declared[tool.Name] = true
+		flat = append(flat, tool)
+	}
+	r.Tools = flat
+	for i := range conv {
+		if (conv[i].Type == "function_call" || conv[i].Type == "custom_tool_call") && conv[i].Namespace != "" {
+			id := responseToolIdentity{name: conv[i].Name, namespace: conv[i].Namespace}
+			qualified := qualifiedToolName(conv[i].Name, conv[i].Namespace)
+			if _, ok := t.names[qualified]; !ok {
+				t.names[qualified] = id
+			}
+			conv[i].Name = qualified
+			conv[i].Namespace = ""
+		}
+	}
+	if len(r.ToolChoice) > 0 {
+		var tc struct {
+			Type      string `json:"type"`
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		}
+		if err := json.Unmarshal(r.ToolChoice, &tc); err == nil && tc.Namespace != "" {
+			qualified := qualifiedToolName(tc.Name, tc.Namespace)
+			if _, ok := t.names[qualified]; !ok {
+				t.names[qualified] = responseToolIdentity{name: tc.Name, namespace: tc.Namespace}
+			}
+			b, _ := json.Marshal(map[string]any{"type": tc.Type, "name": qualified})
+			r.ToolChoice = b
+		}
+	}
+	return conv, nil
+}
+
+// declaredToolNames lists the wire names one declaration set claims, with
+// namespace children flattened to their qualified names.
+func declaredToolNames(tools []RespTool) map[string]bool {
+	names := make(map[string]bool, len(tools))
+	claimToolNames(names, tools)
+	return names
+}
+
+// claimToolNames adds one declaration set's wire names to into.
+func claimToolNames(into map[string]bool, tools []RespTool) {
+	for _, tool := range tools {
+		if tool.Type == "namespace" {
+			for _, child := range tool.Tools {
+				into[qualifiedToolName(child.Name, tool.Name)] = true
+			}
+			continue
+		}
+		if tool.Name != "" {
+			into[tool.Name] = true
+		}
+	}
+}
+
+// flattenDecls converts one declaration set into Chat function tools: a
+// client-executed tool_search becomes the shim function, namespaces unroll to
+// qualified children, custom tools become functions with an empty-object
+// schema, and everything without a Chat equivalent is dropped with a recorded
+// loss. taken carries the wire names this request already claims, so a shim
+// never shadows a client-declared function.
+func (t *ResponseTools) flattenDecls(tools []RespTool, target string, taken map[string]bool) ([]RespTool, *errclass.Error) {
 	var flat []RespTool
-	for _, tool := range r.Tools {
+	for _, tool := range tools {
+		if tool.Type == "tool_search" {
+			if !clientToolSearch(tool, target) {
+				t.AddLoss(tool.Name, "server-side tool has no "+target+" equivalent")
+				continue
+			}
+			name := t.registerToolSearchShim(taken)
+			flat = append(flat, RespTool{
+				Type:        "function",
+				Name:        name,
+				Description: toolSearchDeclarationDescription(tool),
+				Parameters:  toolSearchDeclarationSchema(tool),
+			})
+			continue
+		}
 		if tool.Type != "namespace" {
 			wasCustom := tool.Type == "custom"
 			if !normalizeCustomTool(&tool, target, t) {
@@ -278,32 +450,39 @@ func (t *ResponseTools) Normalize(r *ResponsesRequest, target string) ([]RespIte
 			flat = append(flat, child)
 		}
 	}
-	r.Tools = flat
-	for i := range conv {
-		if (conv[i].Type == "function_call" || conv[i].Type == "custom_tool_call") && conv[i].Namespace != "" {
-			id := responseToolIdentity{name: conv[i].Name, namespace: conv[i].Namespace}
-			qualified := qualifiedToolName(conv[i].Name, conv[i].Namespace)
-			if _, ok := t.names[qualified]; !ok {
-				t.names[qualified] = id
-			}
-			conv[i].Name = qualified
-			conv[i].Namespace = ""
+	return flat, nil
+}
+
+// toolSearchDeclarationSchema keeps the client's declared search parameters
+// when it sent an object schema, so a bridge never narrows what the model may
+// ask for (for example a result limit), and falls back to the single query.
+func toolSearchDeclarationSchema(tool RespTool) json.RawMessage {
+	if HasContent(tool.Parameters) {
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(tool.Parameters, &obj) == nil && obj != nil {
+			return tool.Parameters
 		}
 	}
-	if len(r.ToolChoice) > 0 {
-		var tc struct {
-			Type      string `json:"type"`
-			Name      string `json:"name"`
-			Namespace string `json:"namespace"`
-		}
-		if err := json.Unmarshal(r.ToolChoice, &tc); err == nil && tc.Namespace != "" {
-			qualified := qualifiedToolName(tc.Name, tc.Namespace)
-			if _, ok := t.names[qualified]; !ok {
-				t.names[qualified] = responseToolIdentity{name: tc.Name, namespace: tc.Namespace}
-			}
-			b, _ := json.Marshal(map[string]any{"type": tc.Type, "name": qualified})
-			r.ToolChoice = b
-		}
+	return toolSearchShimSchema
+}
+
+// toolSearchDeclarationDescription keeps the client's declared description so
+// the model sees the same instructions the native declaration carried.
+func toolSearchDeclarationDescription(tool RespTool) string {
+	if d := strings.TrimSpace(tool.Description); d != "" {
+		return d
 	}
-	return conv, nil
+	return toolSearchShimDescription
+}
+
+// clientToolSearch reports whether a tool_search declaration is executed by
+// the client (the model asks, the client searches) and translated to a Chat
+// function shim. An absent execution field means client, per the Responses
+// tool_search contract; a server-executed search has no Chat equivalent.
+func clientToolSearch(tool RespTool, target string) bool {
+	if tool.Type != "tool_search" || target != "/v1/chat/completions" {
+		return false
+	}
+	execution := strings.TrimSpace(tool.Execution)
+	return execution == "" || execution == ToolSearchExecutionClient
 }

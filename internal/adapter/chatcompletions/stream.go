@@ -532,14 +532,28 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 			// Announce the item before any arguments delta references it
 			// (F18 lifecycle parity); call_id-only matches the canonical
 			// native function_call shape (no "id" key).
-			events = append(events, sc.responsesEm().ItemAdded(t.blockIndex, map[string]any{
+			announced := map[string]any{
 				"type": "function_call", "call_id": t.id,
 				"name": t.name, "arguments": "",
-			}))
+			}
+			if sc.respTools.IsToolSearch(t.name) {
+				// A client tool_search has its own item type and streams no
+				// arguments: one query arrives whole with the call.
+				announced = map[string]any{
+					"type": "tool_search_call", "id": shared.ToolSearchItemID(t.id),
+					"call_id": t.id, "execution": "client", "status": "in_progress",
+					"arguments": map[string]any{},
+				}
+			}
+			events = append(events, sc.responsesEm().ItemAdded(t.blockIndex, announced))
 		}
 		if tc.Function.Arguments != "" {
 			t.args.WriteString(tc.Function.Arguments)
-			if sc.respTools.IsCustom(t.name) {
+			switch {
+			case sc.respTools.IsToolSearch(t.name):
+				// Search arguments are not streamed; the restored item
+				// carries them whole, matching the native item shape.
+			case sc.respTools.IsCustom(t.name):
 				// Custom tool arguments stream as wrapped JSON
 				// ({"input":"..."}) that only unwraps once complete:
 				// only the newly-unwrapped input tail is emitted, so
@@ -547,7 +561,7 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 				if tail := shared.CustomInputTail(t.args.String(), &t.customEmitted); tail != "" {
 					events = append(events, sc.responsesEm().InputDelta(t.id, t.blockIndex, tail))
 				}
-			} else {
+			default:
 				events = append(events, sc.responsesEm().ArgsDelta(t.id, t.blockIndex, tc.Function.Arguments))
 			}
 		}
@@ -627,24 +641,28 @@ func (sc *StreamConverter) responsesTerminal() [][]byte {
 	em := sc.responsesEm()
 	var events [][]byte
 	for idx, item := range items {
-		v, ok := item.(shared.RespItem)
-		if !ok {
+		switch v := item.(type) {
+		case shared.ToolSearchCall:
+			// The restored search item is complete on its own: no arguments
+			// event, because the client did not stream them.
+			events = append(events, em.ItemDone(idx, v))
 			continue
-		}
-		switch v.Type {
-		case "reasoning":
-			events = append(events, em.ItemDone(idx, v))
-		case "message":
-			text := sc.respText.String()
-			events = append(events, em.TextDone(v.ID, idx, text))
-			events = append(events, em.ContentPartDone(v.ID, idx, text))
-			events = append(events, em.ItemDone(idx, v))
-		case "function_call":
-			events = append(events, em.ArgsDone(v.CallID, idx, v.Name, v.Arguments))
-			events = append(events, em.ItemDone(idx, v))
-		case "custom_tool_call":
-			events = append(events, em.InputDone(v.CallID, idx, v.Input))
-			events = append(events, em.ItemDone(idx, v))
+		case shared.RespItem:
+			switch v.Type {
+			case "reasoning":
+				events = append(events, em.ItemDone(idx, v))
+			case "message":
+				text := sc.respText.String()
+				events = append(events, em.TextDone(v.ID, idx, text))
+				events = append(events, em.ContentPartDone(v.ID, idx, text))
+				events = append(events, em.ItemDone(idx, v))
+			case "function_call":
+				events = append(events, em.ArgsDone(v.CallID, idx, v.Name, v.Arguments))
+				events = append(events, em.ItemDone(idx, v))
+			case "custom_tool_call":
+				events = append(events, em.InputDone(v.CallID, idx, v.Input))
+				events = append(events, em.ItemDone(idx, v))
+			}
 		}
 	}
 	return append(events, em.Completed(status, usage, items))

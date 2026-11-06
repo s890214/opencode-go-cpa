@@ -615,7 +615,7 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 	if eErr != nil {
 		return nil, eErr
 	}
-	kind, tcName, eErr := shared.DecodeToolChoice(src.ToolChoice)
+	kind, tcName, eErr := decodeResponsesToolChoice(src.ToolChoice, tools)
 	if eErr != nil {
 		return nil, eErr
 	}
@@ -633,6 +633,22 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 		}
 		out.Messages = append(out.Messages, ccMessage{Role: "user", Content: pendingToolMedia})
 		pendingToolMedia = nil
+	}
+	appendCall := func(tc shared.CCToolCall, reasoning *string) {
+		if n := len(out.Messages); n > 0 {
+			last := &out.Messages[n-1]
+			if last.Role == "assistant" {
+				last.ToolCalls = append(last.ToolCalls, tc)
+				if last.ReasoningContent == nil {
+					last.ReasoningContent = reasoning
+				}
+				return
+			}
+		}
+		out.Messages = append(out.Messages, ccMessage{
+			Role: "assistant", ToolCalls: []shared.CCToolCall{tc},
+			ReasoningContent: reasoning,
+		})
 	}
 	for _, item := range items {
 		if item.Type != "function_call_output" && item.Type != "custom_tool_call_output" {
@@ -719,6 +735,29 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 				Role: "assistant", ToolCalls: []shared.CCToolCall{tc},
 				ReasoningContent: reasoning,
 			})
+		case "tool_search_call":
+			// A replayed client search call becomes the shim function call
+			// the Chat model produced, so the conversation keeps its shape.
+			knownCalls[item.CallID] = struct{}{}
+			tc := shared.CCToolCall{ID: item.CallID, Type: "function"}
+			tc.Function.Name = tools.EnsureToolSearchShim()
+			tc.Function.Arguments = shared.ToolSearchQueryText(item.Arguments)
+			appendCall(tc, toolCallReasoning(tools, item.CallID, pendingReasoning, hasPendingReasoning))
+		case "tool_search_output":
+			// The found tools travel as the tool result text (and are
+			// declared in tools by Normalize), which is how a Chat model
+			// learns the callable names the search produced.
+			text := shared.ToolSearchResultText(item.Tools, item.Status)
+			if _, ok := knownCalls[item.CallID]; !ok {
+				out.Messages = append(out.Messages, ccMessage{
+					Role: "user", Content: "[tool search result without a matching search call] " + text,
+				})
+			} else {
+				out.Messages = append(out.Messages, ccMessage{
+					Role: "tool", Content: text, ToolCallID: item.CallID,
+				})
+			}
+			pendingReasoning, hasPendingReasoning = "", false
 		case "function_call_output", "custom_tool_call_output":
 			text := ""
 			plan, eErr := shared.PlanChatToolOutput(item.Output, "tool messages carry text only")
@@ -906,6 +945,24 @@ func respContent(raw json.RawMessage) (any, *errclass.Error) {
 		out = append(out, ccContentPart{Type: "text", Text: p.Text})
 	}
 	return out, nil
+}
+
+// decodeResponsesToolChoice maps a Responses tool_choice onto the Chat
+// vocabulary. A client-executed tool_search choice resolves to the registered
+// shim name, because Chat only knows function names; every other shape follows
+// the shared decoder.
+func decodeResponsesToolChoice(raw json.RawMessage, tools *shared.ResponseTools) (string, string, *errclass.Error) {
+	var probe struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &probe) == nil && probe.Type == "tool_search" {
+		// Only a declared search has a Chat function to name; a choice
+		// without the declaration is contradictory and stays unsupported.
+		if name := tools.ToolSearchName(); name != "" {
+			return shared.ToolChoiceNamed, name, nil
+		}
+	}
+	return shared.DecodeToolChoice(raw)
 }
 
 // applyToolChoiceCC maps a normalized tool choice onto the outbound Chat

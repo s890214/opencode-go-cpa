@@ -966,6 +966,51 @@ func TestInHistorySystemRoleInMessages(t *testing.T) {
 	}
 }
 
+func TestFromResponses_ToolSearchCallAndOutputBridgeToChat(t *testing.T) {
+	body := `{
+		"tools": [{"type":"tool_search","execution":"client"}],
+		"input": [
+			{"type":"message","role":"user","content":"find calendar tool"},
+			{"type":"tool_search_call","call_id":"call_s1","execution":"client","status":"completed","arguments":"{\"query\":\"calendar\"}"},
+			{"type":"tool_search_output","call_id":"call_s1","execution":"client","status":"completed","tools":[
+				{"type":"function","name":"calendar__list","description":"List events","parameters":{"type":"object","properties":{}}}
+			]}
+		]
+	}`
+	rt := shared.NewResponseTools()
+	out, eErr := BuildRequest("m", "openai-response", []byte(body), nil, rt)
+	if eErr != nil {
+		t.Fatalf("BuildRequest: %v", eErr)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	tools := got["tools"].([]any)
+	toolNames := make(map[string]bool)
+	for _, raw := range tools {
+		tool := raw.(map[string]any)["function"].(map[string]any)
+		toolNames[tool["name"].(string)] = true
+	}
+	if !toolNames["tool_search"] || !toolNames["calendar__list"] {
+		t.Fatalf("search shim and dynamically discovered tool must both be declared: %v", tools)
+	}
+	messages := got["messages"].([]any)
+	if len(messages) != 3 {
+		t.Fatalf("messages = %v, want user + search call + search result", messages)
+	}
+	call := messages[1].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)
+	if call["id"] != "call_s1" || call["function"].(map[string]any)["name"] != "tool_search" ||
+		call["function"].(map[string]any)["arguments"] != `{"query":"calendar"}` {
+		t.Fatalf("tool_search_call was not bridged as a function call: %v", call)
+	}
+	result := messages[2].(map[string]any)
+	if result["role"] != "tool" || result["tool_call_id"] != "call_s1" ||
+		!strings.Contains(result["content"].(string), "calendar__list") {
+		t.Fatalf("tool_search_output was not bridged as a tool result: %v", result)
+	}
+}
+
 func TestFromResponses_CustomToolCallAndOutput(t *testing.T) {
 	body := `{
 		"input": [
