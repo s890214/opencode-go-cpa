@@ -1,3 +1,25 @@
+## v0.6.6 — bridge client-executed tool_search to Chat
+
+### Features
+
+- A Responses request that declares a client-executed `tool_search` (the
+  `{"type":"tool_search","execution":"client"}` declaration Codex sends) now
+  keeps that capability when the model is served over Chat Completions. The
+  declaration becomes an ordinary `tool_search` function — renamed
+  `tool_search_1` when the client already owns that function name — and a
+  `tool_search` tool choice resolves to the same name.
+- Replayed history round-trips: `tool_search_call` items become the shim
+  function call, and `tool_search_output` items become its tool result while
+  the tools the search returned stay declared for every later request, so the
+  model can call them by their (flattened) names.
+- Answers restore the native item type: a shim function call comes back as
+  `tool_search_call` with object `arguments`, `id` `tsc_<call_id>`, and
+  `execution: client`, in both non-stream and stream form. The stream
+  announces the item as `in_progress` and sends no
+  `function_call_arguments` events, because search arguments are not streamed.
+- A server-executed `tool_search` still has no Chat equivalent and is reported
+  as a dropped tool instead of being silently bridged.
+
 ## v0.6.5 — echo the host execution id on host calls
 
 ### Fixes
