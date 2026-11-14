@@ -183,7 +183,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 		resp, err = m.bridge.Do(ctx, pluginapi.HTTPRequest{
 			Method:  http.MethodPost,
 			URL:     target,
-			Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
+			Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID, res.cfg.MessagesAuth),
 			Body:    sendBody,
 		})
 		if err != nil {
@@ -283,10 +283,10 @@ func upstreamURL(res *resolvedExecution, stream bool) string {
 	return joined
 }
 
-func upstreamAuthHeaders(route catalog.Route, key, sessionID string) http.Header {
+func upstreamAuthHeaders(route catalog.Route, key, sessionID, messagesAuth string) http.Header {
 	var h http.Header
 	if route == catalog.RouteMessages {
-		h = messages.AuthHeaders(key)
+		h = messages.AuthHeaders(key, messagesAuth)
 	} else {
 		// Chat Completions, Responses and Gemini endpoints are bearer-based.
 		h = chatcompletions.AuthHeaders(key)
@@ -527,7 +527,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		st, _, id, err = m.bridge.DoStream(ctx, pluginapi.HTTPRequest{
 			Method:  http.MethodPost,
 			URL:     target,
-			Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
+			Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID, res.cfg.MessagesAuth),
 			Body:    sendBody,
 		})
 		debugTrace("executor stream DoStream status=%d upstreamID=%s err=%v attempt=%d", st, id, err, attempt)

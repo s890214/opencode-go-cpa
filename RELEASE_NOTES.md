@@ -18,6 +18,12 @@
   primary, `catalog-<name>.json` for the rest), refresh loop and protocol
   policy, so a broken or slow upstream cannot freeze the others.
 
+- `messages-auth` selects the Messages-route authentication header per channel:
+  `x-api-key` (OpenCode Go, default) or `bearer` (an Anthropic-wire gateway
+  that only accepts bearer tokens, e.g. OpenDesign, which answers 401 to
+  `x-api-key`). Without it such a channel could only serve those models over
+  Chat Completions.
+
 ### Configuration notes
 
 - `upstreams` entries are **additional** channels: they never inherit the

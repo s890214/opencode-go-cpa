@@ -13,6 +13,14 @@ import (
 	"opencode-go-cpa/internal/catalog"
 )
 
+// Messages-route auth schemes. Values mirror config.MessagesAuthScheme*; the
+// plugin package asserts both sets agree, and the adapter stays free of the
+// config package so it can be used on its own.
+const (
+	AuthSchemeXAPIKey = "x-api-key"
+	AuthSchemeBearer  = "bearer"
+)
+
 // EndpointPath is the upstream endpoint path for the Messages route (FR-004).
 var EndpointPath = catalog.RouteMessages.EndpointPath()
 
@@ -20,11 +28,16 @@ var EndpointPath = catalog.RouteMessages.EndpointPath()
 const anthropicVersion = "2023-06-01"
 
 // AuthHeaders returns the upstream authentication headers for a Messages
-// request: x-api-key plus the required anthropic-version header. The
-// executor wires these in M5; the key is never logged (FR-007, FR-011).
-func AuthHeaders(key string) http.Header {
+// request: the key in the scheme the channel asked for (x-api-key by default,
+// bearer for a gateway that only honours bearer tokens) plus the required
+// anthropic-version header. The key is never logged (FR-007, FR-011).
+func AuthHeaders(key, scheme string) http.Header {
 	h := make(http.Header)
-	h.Set("x-api-key", key)
+	if scheme == AuthSchemeBearer {
+		h.Set("Authorization", "Bearer "+key)
+	} else {
+		h.Set("x-api-key", key)
+	}
 	h.Set("anthropic-version", anthropicVersion)
 	return h
 }

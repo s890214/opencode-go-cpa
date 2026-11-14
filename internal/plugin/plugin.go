@@ -304,6 +304,10 @@ func pluginConfigFields() []pluginapi.ConfigField {
 			Description: "Path of each protocol (`chat-completions: /v1/chat/completions`, ...). Change these when the upstream moves an endpoint; the plugin hardcodes nothing.",
 		},
 		{
+			Name:        "messages-auth",
+			Type:        pluginapi.ConfigFieldTypeString,
+			Description: "Header the Messages route authenticates with (`x-api-key` for OpenCode Go, `bearer` for an Anthropic-wire gateway that only accepts bearer tokens). Per channel; extra channels default to `x-api-key`."},
+		{
 			Name:        "fallback-routes",
 			Type:        pluginapi.ConfigFieldTypeArray,
 			Description: "Family prefixes for models the `models` block does not list (`[{prefix: gpt, protocol: responses}, ...]`), first match wins. Empty means no guessing.",

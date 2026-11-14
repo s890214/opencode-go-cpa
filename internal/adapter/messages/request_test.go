@@ -24,7 +24,7 @@ func decodeReq(t *testing.T, body []byte) map[string]any {
 }
 
 func TestAuthHeaders(t *testing.T) {
-	h := AuthHeaders("secret-key")
+	h := AuthHeaders("secret-key", "")
 	if got := h.Get("x-api-key"); got != "secret-key" {
 		t.Errorf("x-api-key = %q", got)
 	}
@@ -36,6 +36,19 @@ func TestAuthHeaders(t *testing.T) {
 	}
 	if http.Header(nil).Get("x") != "" {
 		t.Error("nil header sanity")
+	}
+
+	// A gateway that only accepts bearer tokens gets Authorization and no
+	// x-api-key, while the version header stays.
+	b := AuthHeaders("secret-key", AuthSchemeBearer)
+	if got := b.Get("Authorization"); got != "Bearer secret-key" {
+		t.Errorf("Authorization = %q", got)
+	}
+	if b.Get("x-api-key") != "" {
+		t.Error("bearer scheme must not send x-api-key")
+	}
+	if got := b.Get("anthropic-version"); got != anthropicVersion {
+		t.Errorf("anthropic-version = %q", got)
 	}
 }
 

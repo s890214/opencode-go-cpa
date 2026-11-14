@@ -169,6 +169,9 @@ type Config struct {
 	// MetadataURL is models.dev-style metadata (limits, reasoning options,
 	// modalities) merged underneath the upstream catalog. Empty disables it.
 	MetadataURL string
+	// MessagesAuth selects the Messages route authentication scheme of the
+	// channel this view describes ("x-api-key" or "bearer").
+	MessagesAuth string
 	// Upstreams is the ordered list of upstream channels. The first entry is
 	// the primary channel and keeps the legacy field values above.
 	Upstreams []Upstream
@@ -195,7 +198,18 @@ type Upstream struct {
 	ProtocolEndpoints map[string]string
 	Protocols         Protocols
 	FallbackRoutes    []FallbackRoute
+	// MessagesAuth selects the header the Messages route authenticates with.
+	// OpenCode Go expects x-api-key; an Anthropic-wire gateway that only
+	// accepts bearer tokens (e.g. OpenDesign) sets "bearer".
+	MessagesAuth string
 }
+
+// Messages auth schemes. MessagesAuthSchemeXAPIKey is the Anthropic default and
+// what OpenCode Go itself expects.
+const (
+	MessagesAuthSchemeXAPIKey = "x-api-key"
+	MessagesAuthSchemeBearer  = "bearer"
+)
 
 // PrimaryUpstream returns the first configured upstream. A Config built
 // without an `upstreams` block — the legacy single-channel shape, or a struct
@@ -215,6 +229,7 @@ func (c Config) PrimaryUpstream() Upstream {
 			ProtocolEndpoints: c.ProtocolEndpoints,
 			Protocols:         c.Protocols,
 			FallbackRoutes:    c.FallbackRoutes,
+			MessagesAuth:      normalizeMessagesAuth(nil),
 		}
 	}
 	return c.Upstreams[0]
@@ -282,6 +297,7 @@ func (c Config) ForUpstream(u Upstream) Config {
 	out.ProtocolEndpoints = u.ProtocolEndpoints
 	out.Protocols = u.Protocols
 	out.FallbackRoutes = u.FallbackRoutes
+	out.MessagesAuth = u.MessagesAuth
 	out.Upstreams = nil
 	out.CatalogCachePath = upstreamCachePath(c.CatalogCachePath, u.Name, c.PrimaryUpstream().Name)
 	return out
@@ -318,6 +334,7 @@ type rawConfig struct {
 	FallbackRoutes     []FallbackRoute           `yaml:"fallback-routes"`
 	RouteOverrides     map[string]RouteOverride  `yaml:"route-overrides"`
 	ProtocolPreference map[string][]string       `yaml:"protocol-preference"`
+	MessagesAuth       *string                   `yaml:"messages-auth"`
 	AllowHTTP          bool                      `yaml:"allow-http"`
 	RequestTimeout     *string                   `yaml:"request-timeout"`
 	StreamIdleTimeout  *string                   `yaml:"stream-idle-timeout"`
@@ -344,6 +361,7 @@ type rawUpstream struct {
 	FallbackRoutes     []FallbackRoute           `yaml:"fallback-routes"`
 	RouteOverrides     map[string]RouteOverride  `yaml:"route-overrides"`
 	ProtocolPreference map[string][]string       `yaml:"protocol-preference"`
+	MessagesAuth       *string                   `yaml:"messages-auth"`
 }
 
 // asRawConfig lets an upstream entry reuse mergeModels (which folds `models`
@@ -462,6 +480,7 @@ func Load(yamlBytes []byte) (Config, error) {
 		ProtocolEndpoints: protocolEndpoints(raw.ProtocolEndpoints),
 		Protocols:         protocols,
 		FallbackRoutes:    fallbackRoutes(raw.FallbackRoutes),
+		MessagesAuth:      normalizeMessagesAuth(raw.MessagesAuth),
 	}
 	upstreams, err := buildUpstreams(raw, primary)
 	if err != nil {
@@ -489,6 +508,7 @@ func Load(yamlBytes []byte) (Config, error) {
 	c.Protocols = first.Protocols
 	c.Models = first.Models
 	c.ProtocolEndpoints = first.ProtocolEndpoints
+	c.MessagesAuth = first.MessagesAuth
 	c.CatalogPath = first.CatalogPath
 	c.QuotaPath = first.QuotaPath
 	c.FallbackRoutes = first.FallbackRoutes
@@ -543,6 +563,7 @@ func buildUpstreams(raw rawConfig, primary Upstream) ([]Upstream, error) {
 			ProtocolEndpoints: protocolEndpoints(nil),
 			Protocols:         mergeProtocols(ru.Protocols, primary.Protocols),
 			FallbackRoutes:    primary.FallbackRoutes,
+			MessagesAuth:      normalizeMessagesAuth(ru.MessagesAuth),
 		}
 		// An extra channel cannot opt out of its prefix: two channels must
 		// never publish the same model ID, because the host keeps one
@@ -811,6 +832,21 @@ func (c Config) validate() error {
 	return nil
 }
 
+// normalizeMessagesAuth resolves the Messages authentication scheme. Unset and
+// empty both mean the Anthropic default (x-api-key); anything else is returned
+// lower-cased so validate() can reject it with a precise message.
+func normalizeMessagesAuth(raw *string) string {
+	if raw == nil {
+		return MessagesAuthSchemeXAPIKey
+	}
+	switch v := strings.ToLower(strings.TrimSpace(*raw)); v {
+	case "":
+		return MessagesAuthSchemeXAPIKey
+	default:
+		return v
+	}
+}
+
 // validUpstreamName keeps channel names usable in auth labels, file names and
 // model prefixes.
 func validUpstreamName(name string) bool {
@@ -835,6 +871,11 @@ func (c Config) validateUpstream() error {
 	}
 	if len(c.APIKeys) == 0 {
 		return fmt.Errorf("api-keys: at least one key is required")
+	}
+	switch c.MessagesAuth {
+	case "", MessagesAuthSchemeXAPIKey, MessagesAuthSchemeBearer:
+	default:
+		return fmt.Errorf("messages-auth: must be %q or %q", MessagesAuthSchemeXAPIKey, MessagesAuthSchemeBearer)
 	}
 	for i, k := range c.APIKeys {
 		if k.Value == "" {

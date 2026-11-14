@@ -191,6 +191,7 @@ plugins:
 | `protocol-endpoints` | `map` | `/v1/{chat/completions,responses,messages}` | Path of each protocol, appended to `base-url`. Change these when the upstream moves an endpoint. |
 | `quota-path` | `string` | `/v1/usage` | Usage/quota endpoint, relative to `base-url`. Separate from the protocol endpoints. |
 | `catalog-path` | `string` | `/v1/models` | Model catalog endpoint, relative to `base-url`. Separate from the protocol endpoints because the upstream serves the model list on its own path. |
+| `messages-auth` | `string` | `x-api-key` | Header the Messages route authenticates with. `bearer` is for an Anthropic-wire gateway that rejects `x-api-key` (e.g. OpenDesign). Per channel: extra channels default to `x-api-key` and never inherit the primary's value. |
 | `model-prefix.enabled` | `bool` | `true` | When `true`, client-facing model names use `<prefix>/<model>`. When `false`, uses bare model IDs. |
 | `model-prefix.value` | `string` | `opencode-go` | Provider prefix string when prefixing is enabled. |
 | `catalog.refresh-interval` | `duration` | `15m` | Interval between catalog polling refreshes (e.g. `15m`, `1h`). Minimum is `1m`. |

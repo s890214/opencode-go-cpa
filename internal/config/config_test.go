@@ -491,3 +491,39 @@ upstreams:
 		t.Error("UpstreamByName(nope) resolved")
 	}
 }
+
+func TestMessagesAuthScheme(t *testing.T) {
+	c, err := Load([]byte(withKey))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if c.MessagesAuth != MessagesAuthSchemeXAPIKey {
+		t.Errorf("default messages-auth = %q", c.MessagesAuth)
+	}
+
+	c, err = Load([]byte("messages-auth: bearer\n" + withKey + `upstreams:
+  - name: od
+    base-url: https://second.test/v1
+    api-keys:
+      - value: second-key
+`))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if c.Upstreams[0].MessagesAuth != MessagesAuthSchemeBearer {
+		t.Errorf("primary messages-auth = %q", c.Upstreams[0].MessagesAuth)
+	}
+	// The scheme is per channel: an extra channel defaults to x-api-key and
+	// must not inherit the primary's bearer.
+	if c.Upstreams[1].MessagesAuth != MessagesAuthSchemeXAPIKey {
+		t.Errorf("extra messages-auth = %q", c.Upstreams[1].MessagesAuth)
+	}
+	if got := c.ForUpstream(c.Upstreams[1]).MessagesAuth; got != MessagesAuthSchemeXAPIKey {
+		t.Errorf("view messages-auth = %q", got)
+	}
+}
+
+func TestMessagesAuthRejectsUnknownScheme(t *testing.T) {
+	_, err := Load([]byte("messages-auth: basic\n" + withKey))
+	requireErrContains(t, err, "messages-auth")
+}

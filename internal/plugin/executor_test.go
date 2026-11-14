@@ -17,6 +17,7 @@ import (
 
 	"opencode-go-cpa/internal/adapter/shared"
 	"opencode-go-cpa/internal/catalog"
+	"opencode-go-cpa/internal/config"
 	"opencode-go-cpa/internal/errclass"
 )
 
@@ -1393,8 +1394,16 @@ func TestConvertNonStreamSeamBranches(t *testing.T) {
 	if got := catalog.JoinUpstreamURL("https://gw.test/", "/v1/responses"); got != "https://gw.test/v1/responses" {
 		t.Fatalf("url join = %q", got)
 	}
-	if got := upstreamAuthHeaders(catalog.RouteChatCompletions, "k", "session"); got.Get("Authorization") != "Bearer k" || got.Get("x-opencode-session") != "session" {
+	if got := upstreamAuthHeaders(catalog.RouteChatCompletions, "k", "session", ""); got.Get("Authorization") != "Bearer k" || got.Get("x-opencode-session") != "session" {
 		t.Fatalf("bearer headers = %v", got)
+	}
+	// Messages route: x-api-key by default (OpenCode Go), bearer on request
+	// (an Anthropic-wire gateway that rejects x-api-key).
+	if got := upstreamAuthHeaders(catalog.RouteMessages, "k", "s", ""); got.Get("x-api-key") != "k" || got.Get("Authorization") != "" || got.Get("anthropic-version") == "" {
+		t.Fatalf("default messages headers = %v", got)
+	}
+	if got := upstreamAuthHeaders(catalog.RouteMessages, "k", "s", config.MessagesAuthSchemeBearer); got.Get("Authorization") != "Bearer k" || got.Get("x-api-key") != "" {
+		t.Fatalf("bearer messages headers = %v", got)
 	}
 	// Adapters own status classification uniformly (§7).
 	if _, eErr := convertNonStream(catalog.RouteMessages, "claude", http.StatusServiceUnavailable, []byte("upstream down")); eErr == nil ||

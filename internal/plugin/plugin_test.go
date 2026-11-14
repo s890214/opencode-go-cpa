@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
+	"opencode-go-cpa/internal/adapter/messages"
 	"opencode-go-cpa/internal/catalog"
 	"opencode-go-cpa/internal/config"
 )
@@ -436,7 +437,7 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 		t.Fatalf("schema_version = %d, want %d", reg.SchemaVersion, pluginabi.SchemaVersion)
 	}
 	if reg.Metadata.Name != pluginName || reg.Metadata.Version != pluginVersion ||
-		len(reg.Metadata.ConfigFields) != 18 {
+		len(reg.Metadata.ConfigFields) != 19 {
 		t.Fatalf("metadata wrong: %+v", reg.Metadata)
 	}
 	if !reg.Capabilities.ModelProvider || !reg.Capabilities.AuthProvider {
@@ -517,6 +518,7 @@ func TestRegistrationConfigFields(t *testing.T) {
 		{"route-overrides", pluginapi.ConfigFieldTypeObject},
 		{"models", pluginapi.ConfigFieldTypeObject},
 		{"protocol-endpoints", pluginapi.ConfigFieldTypeObject},
+		{"messages-auth", pluginapi.ConfigFieldTypeString},
 		{"fallback-routes", pluginapi.ConfigFieldTypeArray},
 		{"request-timeout", pluginapi.ConfigFieldTypeString},
 		{"stream-idle-timeout", pluginapi.ConfigFieldTypeString},
@@ -1346,5 +1348,17 @@ upstreams:
 	}
 	if got := authUpstreamName(nil, nil, cfg); got != config.DefaultUpstreamName {
 		t.Fatalf("fallback = %q", got)
+	}
+}
+
+// The Messages adapter keeps its own scheme constants so it stays free of the
+// config package; the two sets must agree or a channel would silently fall
+// back to x-api-key.
+func TestMessagesAuthSchemesAgree(t *testing.T) {
+	if messages.AuthSchemeXAPIKey != config.MessagesAuthSchemeXAPIKey {
+		t.Fatalf("x-api-key scheme drifted: %q vs %q", messages.AuthSchemeXAPIKey, config.MessagesAuthSchemeXAPIKey)
+	}
+	if messages.AuthSchemeBearer != config.MessagesAuthSchemeBearer {
+		t.Fatalf("bearer scheme drifted: %q vs %q", messages.AuthSchemeBearer, config.MessagesAuthSchemeBearer)
 	}
 }
