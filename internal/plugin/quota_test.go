@@ -88,7 +88,7 @@ func TestAccountLabels(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tt := range []struct{ key, old, want string }{{"one", "OpenCode Go credential hash", "Personal"}, {"two", "opencode-go-key-hash", "OpenCode Go 2"}, {"two", "Work", "Work"}} {
-		if got := accountLabel(cfg, tt.key, tt.old, 0); got != tt.want {
+		if got := accountLabel(cfg, "", tt.key, tt.old, 0); got != tt.want {
 			t.Fatalf("got %q want %q", got, tt.want)
 		}
 	}
@@ -97,7 +97,7 @@ func TestAccountLabels(t *testing.T) {
 	if err != nil || result.Auth.Label != "Personal" || result.Auth.ID != "stable-id" || string(result.Auth.StorageJSON) != string(raw) {
 		t.Fatal("name migration changed credential storage")
 	}
-	if accountLabel(config.Config{}, "key", "", 0) != "OpenCode Go" {
+	if accountLabel(config.Config{}, "", "key", "", 0) != "OpenCode Go" {
 		t.Fatal("bad default name")
 	}
 }

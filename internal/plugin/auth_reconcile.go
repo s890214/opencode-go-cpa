@@ -80,8 +80,8 @@ func (m *Manager) reconcileAuthRecords(ctx context.Context, cfg config.Config) e
 		return nil
 	}
 	expected := make(map[string]string, len(cfg.APIKeys))
-	for _, key := range cfg.APIKeys {
-		expected[authRecordID(key.Value)] = key.Value
+	for _, entry := range cfg.KeyEntries() {
+		expected[authRecordID(entry.Key.Value)] = entry.Upstream
 	}
 	for _, entry := range entries {
 		if entry.RuntimeOnly {
@@ -107,7 +107,7 @@ func (m *Manager) reconcileAuthRecords(ctx context.Context, cfg config.Config) e
 			continue
 		}
 		id := authRecordID(record.APIKey)
-		_, configured := expected[id]
+		upstream, configured := expected[id]
 		if !configured && !isLegacyManagedName(base) {
 			// The api_key is not one of ours and the name is not one we ever
 			// wrote: a hand-written record, never touched.
@@ -122,7 +122,11 @@ func (m *Manager) reconcileAuthRecords(ctx context.Context, cfg config.Config) e
 			_ = m.bridge.Log("info", fmt.Sprintf("opencode-go credential %s removed: no longer listed in configured api-keys", shortAuthID(id)), nil)
 			continue
 		}
-		wantBase := authFileName(accountLabel(cfg, record.APIKey, record.Label, 0))
+		recordUpstream := resolvedUpstreamName(cfg, record.Upstream)
+		if configured && strings.TrimSpace(upstream) != "" {
+			recordUpstream = upstream
+		}
+		wantBase := authFileName(accountLabel(cfg, recordUpstream, record.APIKey, record.Label, 0))
 		if base != wantBase {
 			// Older versions wrote the 64-hex canonical id or a bare readable
 			// label; fold both into <Label>-<short digest> so the panel shows a

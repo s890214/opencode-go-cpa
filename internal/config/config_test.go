@@ -352,3 +352,142 @@ func TestEmptyOverrideEndpointUsesProtocolDefault(t *testing.T) {
 		t.Fatalf("endpoint = %q, want empty (protocol default)", got)
 	}
 }
+
+// --- extra upstream channels -------------------------------------------------
+
+func TestExtraUpstreamIsAdditionalChannel(t *testing.T) {
+	c, err := Load([]byte(`base-url: https://primary.test/go
+protocol-endpoints:
+  chat-completions: /openai/v1/chat/completions
+api-keys:
+  - value: primary-key
+upstreams:
+  - name: od
+    base-url: https://second.test/v1
+    api-keys:
+      - value: second-key
+`))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(c.Upstreams) != 2 {
+		t.Fatalf("Upstreams = %d, want 2", len(c.Upstreams))
+	}
+	primary, extra := c.Upstreams[0], c.Upstreams[1]
+	if primary.Name != DefaultUpstreamName || primary.BaseURL != "https://primary.test/go" {
+		t.Errorf("primary = %+v", primary)
+	}
+	if len(primary.APIKeys) != 1 || primary.APIKeys[0].Value != "primary-key" {
+		t.Errorf("primary keys hijacked: %+v", primary.APIKeys)
+	}
+	if extra.Name != "od" || extra.BaseURL != "https://second.test/v1" {
+		t.Errorf("extra = %+v", extra)
+	}
+	if len(extra.APIKeys) != 1 || extra.APIKeys[0].Value != "second-key" {
+		t.Errorf("extra keys = %+v", extra.APIKeys)
+	}
+	// An extra channel must publish its models under its own prefix, never
+	// the primary's IDs.
+	if !extra.ModelPrefix.Enabled || extra.ModelPrefix.Value != "od" {
+		t.Errorf("extra prefix = %+v", extra.ModelPrefix)
+	}
+	// The primary's explicit endpoint override is not copied: a different
+	// vendor must not inherit another host's paths.
+	if got := extra.ProtocolEndpoints["chat-completions"]; got != DefaultProtocolEndpoints["chat-completions"] {
+		t.Errorf("extra chat endpoint = %q, want default %q", got, DefaultProtocolEndpoints["chat-completions"])
+	}
+	// Global settings stay shared.
+	if extra.CatalogPath != DefaultCatalogPath || extra.QuotaPath != DefaultQuotaPath {
+		t.Errorf("extra paths = %q/%q", extra.CatalogPath, extra.QuotaPath)
+	}
+	// One catalogue snapshot per channel, the primary keeps the legacy path.
+	if c.ForUpstream(extra).CatalogCachePath == c.ForUpstream(primary).CatalogCachePath {
+		t.Error("channels share one catalog cache file")
+	}
+}
+
+func TestExtraUpstreamRequiresName(t *testing.T) {
+	_, err := Load([]byte(withKey + `upstreams:
+  - base-url: https://second.test/v1
+    api-keys:
+      - value: second-key
+`))
+	requireErrContains(t, err, "name is required")
+}
+
+func TestExtraUpstreamRequiresBaseURL(t *testing.T) {
+	_, err := Load([]byte(withKey + `upstreams:
+  - name: od
+    api-keys:
+      - value: second-key
+`))
+	requireErrContains(t, err, "upstreams[od]")
+}
+
+func TestExtraUpstreamRequiresKeys(t *testing.T) {
+	_, err := Load([]byte(withKey + `upstreams:
+  - name: od
+    base-url: https://second.test/v1
+`))
+	requireErrContains(t, err, "upstreams[od]")
+}
+
+func TestExtraUpstreamRejectsDuplicateName(t *testing.T) {
+	_, err := Load([]byte(withKey + `upstreams:
+  - name: od
+    base-url: https://second.test/v1
+    api-keys:
+      - value: second-key
+  - name: od
+    base-url: https://third.test/v1
+    api-keys:
+      - value: third-key
+`))
+	requireErrContains(t, err, "already used")
+}
+
+func TestExtraUpstreamCannotDropItsPrefix(t *testing.T) {
+	c, err := Load([]byte(withKey + `upstreams:
+  - name: od
+    base-url: https://second.test/v1
+    base-url-typo-guard: ignored
+    model-prefix:
+      enabled: false
+    api-keys:
+      - value: second-key
+`))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if got := c.Upstreams[1].ModelPrefix; !got.Enabled || got.Value != "od" {
+		t.Fatalf("prefix = %+v, want enabled od", got)
+	}
+}
+
+func TestUpstreamByNameAndKeyEntries(t *testing.T) {
+	c, err := Load([]byte(`api-keys:
+  - value: primary-key
+upstreams:
+  - name: od
+    base-url: https://second.test/v1
+    api-keys:
+      - value: second-key
+      - value: third-key
+`))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	entries := c.KeyEntries()
+	if len(entries) != 3 {
+		t.Fatalf("KeyEntries = %d, want 3", len(entries))
+	}
+	if entries[0].Upstream != DefaultUpstreamName || entries[1].Upstream != "od" || entries[2].Upstream != "od" {
+		t.Fatalf("KeyEntries order/owner = %+v", entries)
+	}
+	if _, ok := c.UpstreamByName("od"); !ok {
+		t.Error("UpstreamByName(od) missing")
+	}
+	if _, ok := c.UpstreamByName("nope"); ok {
+		t.Error("UpstreamByName(nope) resolved")
+	}
+}

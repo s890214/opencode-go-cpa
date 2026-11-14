@@ -26,7 +26,7 @@ const ProviderID = "opencode-go"
 // pluginName / pluginVersion are reported in registration metadata.
 const (
 	pluginName    = "opencode-go-cpa"
-	pluginVersion = "0.6.6"
+	pluginVersion = "0.7.0"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
@@ -40,6 +40,15 @@ const githubRepoURL = "https://github.com/s890214/opencode-go-cpa"
 // the full request-timeout.
 const registerRefreshTimeout = 10 * time.Second
 
+// upstreamCatalog pairs one channel's config view with its own catalog
+// manager. Each channel keeps its own model snapshot, protocol policy and
+// prefix, so nothing about one upstream can leak into another.
+type upstreamCatalog struct {
+	name string
+	cfg  config.Config
+	mgr  *catalog.Manager
+}
+
 // Manager owns dispatcher state (config snapshot, catalog manager, refresh
 // loop) and routes every RPC method. Safe for concurrent HandleCall use.
 type Manager struct {
@@ -51,7 +60,9 @@ type Manager struct {
 
 	mu  sync.RWMutex
 	cfg config.Config
-	mgr *catalog.Manager
+	// upstreams is ordered exactly like cfg.Upstreams; the first entry is
+	// the primary channel.
+	upstreams []upstreamCatalog
 	// stop/done manage the one background refresh goroutine; both nil
 	// when no loop is running.
 	stop chan struct{}
@@ -118,8 +129,14 @@ func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err er
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
 		return m.handleLifecycle(request)
-	case pluginabi.MethodModelStatic, pluginabi.MethodModelForAuth:
+	case pluginabi.MethodModelStatic:
 		return m.handleModels()
+	case pluginabi.MethodModelForAuth:
+		var req pluginapi.AuthModelRequest
+		if json.Unmarshal(request, &req) != nil {
+			return ErrEnvelope("invalid_request", "malformed auth model request body"), nil
+		}
+		return m.handleModelsForAuth(req)
 	case pluginabi.MethodPluginShutdown:
 		return m.handleShutdown()
 	case pluginabi.MethodExecutorExecute:
@@ -231,6 +248,11 @@ type registrationResult struct {
 
 func pluginConfigFields() []pluginapi.ConfigField {
 	return []pluginapi.ConfigField{
+		{
+			Name:        "upstreams",
+			Type:        pluginapi.ConfigFieldTypeArray,
+			Description: "Additional upstream channels declared next to the primary (top-level) one (`- name: od`, `base-url: ...`, `api-keys: [...]`). Each entry needs its own name, base URL and keys; its models are published as `<name>/<model>` so they never collide with the primary's. `protocol-endpoints` defaults to the shipped paths and must be overridden for a vendor with different routes. Without this block the plugin serves the single top-level channel.",
+		},
 		{
 			Name:        "api-keys",
 			Type:        pluginapi.ConfigFieldTypeArray,
@@ -357,7 +379,7 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	}
 	m.lifeMu.Lock()
 	defer m.lifeMu.Unlock()
-	debugTrace("lifecycle config_loaded key_count=%d prefix_enabled=%t prefix=%s", len(cfg.APIKeys), cfg.ModelPrefix.Enabled, cfg.ModelPrefix.Value)
+	debugTrace("lifecycle config_loaded upstream_count=%d key_count=%d prefix_enabled=%t prefix=%s", len(cfg.Upstreams), len(cfg.APIKeys), cfg.ModelPrefix.Enabled, cfg.ModelPrefix.Value)
 	ctx, cancel := context.WithTimeout(context.Background(), registerRefreshTimeout)
 	defer cancel()
 	if err := m.reconcileAuthRecords(ctx, cfg); err != nil {
@@ -369,18 +391,36 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	if m.bridge != nil {
 		client = m.bridge
 	}
-	mgr := catalog.New(cfg, client)
-	// Serve the last good snapshot immediately: a cold start during an
-	// upstream catalog outage must not expose an empty model list.
-	mgr.SetCachePath(cfg.CatalogCachePath)
-	if mgr.Restore() {
-		debugTrace("lifecycle catalog restored model_count=%d", len(mgr.Models()))
+	// One catalog manager per channel: each has its own base URL, keys,
+	// prefix, protocol policy and snapshot file.
+	upstreams := make([]upstreamCatalog, 0, len(cfg.Upstreams))
+	for _, u := range cfg.Upstreams {
+		view := cfg.ForUpstream(u)
+		uc := upstreamCatalog{name: u.Name, cfg: view, mgr: catalog.New(view, client)}
+		// Serve the last good snapshot immediately: a cold start during an
+		// upstream catalog outage must not expose an empty model list.
+		uc.mgr.SetCachePath(view.CatalogCachePath)
+		if uc.mgr.Restore() {
+			debugTrace("lifecycle catalog restored upstream=%s model_count=%d", u.Name, len(uc.mgr.Models()))
+		}
+		// models.dev metadata is large and optional: fetch it off the
+		// registration path so a slow models.dev never delays startup.
+		go m.loadMetadata(uc.mgr, view, client)
+		upstreams = append(upstreams, uc)
 	}
-	// models.dev metadata is large and optional: fetch it off the
-	// registration path so a slow models.dev never delays startup.
-	go m.loadMetadata(mgr, cfg, client)
-	refreshErr := refreshOnce(context.Background(), mgr, m.bridge, registerRefreshTimeout, cfg)
-	debugTrace("lifecycle refresh_complete model_count=%d refresh_error=%t", len(mgr.Models()), refreshErr != nil)
+	refreshErrs := refreshAll(context.Background(), upstreams, m.bridge, registerRefreshTimeout)
+	var refreshErr error
+	for _, err := range refreshErrs {
+		if err != nil {
+			refreshErr = err
+			break
+		}
+	}
+	totalModels := 0
+	for _, uc := range upstreams {
+		totalModels += len(uc.mgr.Models())
+	}
+	debugTrace("lifecycle refresh_complete upstream_count=%d model_count=%d refresh_error=%t", len(upstreams), totalModels, refreshErr != nil)
 
 	// Retire any running loop and wait for its exit outside m.mu: a mid-refresh
 	// tick must never stall readers holding RLock (F4). lifeMu keeps the
@@ -390,6 +430,7 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	}
 
 	m.mu.Lock()
+	previous := m.upstreams
 	m.cfg = cfg
 	// FR-002 stale-while-unavailable: a failed refresh must neither wipe a
 	// non-empty previous snapshot nor keep the OLD manager, whose stored cfg
@@ -402,17 +443,34 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	// (stale-while-unavailable:false) no seed happens — same as the ticker
 	// failure path — so a reconfigure during an outage serves nothing until
 	// a refresh succeeds, honoring the operator's policy on BOTH paths.
-	if refreshErr != nil && cfg.Catalog.StaleWhileUnavailable && m.mgr != nil && len(m.mgr.Models()) > 0 {
-		mgr.SeedFrom(m.mgr)
+	if refreshErr != nil && cfg.Catalog.StaleWhileUnavailable {
+		for i := range upstreams {
+			if refreshErrs[upstreams[i].name] == nil {
+				continue
+			}
+			if old, ok := findUpstreamCatalog(previous, upstreams[i].name); ok && len(old.mgr.Models()) > 0 {
+				upstreams[i].mgr.SeedFrom(old.mgr)
+			}
+		}
 	}
-	m.mgr = mgr
+	m.upstreams = upstreams
 	stop, done := make(chan struct{}), make(chan struct{})
 	m.stop, m.done = stop, done
 	interval := cfg.Catalog.RefreshInterval
 	m.mu.Unlock()
 
-	m.startRefreshLoop(cfg, mgr, interval, stop, done)
+	m.startRefreshLoop(upstreams, interval, stop, done)
 	return registrationEnvelope(), nil
+}
+
+// findUpstreamCatalog resolves one channel from a snapshot slice.
+func findUpstreamCatalog(list []upstreamCatalog, name string) (upstreamCatalog, bool) {
+	for _, uc := range list {
+		if uc.name == name {
+			return uc, true
+		}
+	}
+	return upstreamCatalog{}, false
 }
 
 // materializeAuthRecords creates the canonical record for every configured
@@ -457,20 +515,21 @@ func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config)
 			existing[id] = struct{}{}
 		}
 	}
-	for i, key := range cfg.APIKeys {
-		id := authRecordID(key.Value)
-		label := accountLabel(cfg, key.Value, "", i)
+	for _, entry := range cfg.KeyEntries() {
+		id := authRecordID(entry.Key.Value)
+		label := accountLabel(cfg, entry.Upstream, entry.Key.Value, "", 0)
 		if _, ok := existing[id]; ok {
 			continue
 		}
 		name := availableAuthName(label, existing)
 		record, err := json.Marshal(struct {
-			Type   string `json:"type"`
-			ID     string `json:"id"`
-			Label  string `json:"label"`
-			APIKey string `json:"api_key"`
+			Type     string `json:"type"`
+			ID       string `json:"id"`
+			Label    string `json:"label"`
+			Upstream string `json:"upstream,omitempty"`
+			APIKey   string `json:"api_key"`
 		}{
-			Type: "opencode-go", ID: id, Label: label, APIKey: key.Value,
+			Type: "opencode-go", ID: id, Label: label, Upstream: entry.Upstream, APIKey: entry.Key.Value,
 		})
 		if err != nil {
 			return fmt.Errorf("build auth record")
@@ -482,35 +541,90 @@ func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config)
 		}
 		existing[id] = struct{}{}
 		existing[name] = struct{}{}
-		debugTrace("auth materialized id=%s file=%s", id, name)
+		debugTrace("auth materialized id=%s file=%s upstream=%s", id, name, entry.Upstream)
 	}
 	return nil
 }
 
-// handleModels implements model.static / model.for_auth (FR-003): the last
-// good catalog snapshot mapped to wire ModelInfos; empty catalog yields an
-// empty slice, not an error.
+// handleModels implements model.static (FR-003): every channel's last good
+// catalog snapshot mapped to wire ModelInfos; an empty catalog yields an empty
+// slice, not an error.
 func (m *Manager) handleModels() ([]byte, error) {
 	m.mu.RLock()
-	mgr := m.mgr
+	upstreams := m.upstreams
 	m.mu.RUnlock()
 	models := make([]pluginapi.ModelInfo, 0)
-	if mgr != nil {
-		for _, rec := range mgr.Models() {
-			models = append(models, pluginapi.ModelInfo{
-				ID:                        rec.PublicID,
-				Object:                    "model",
-				OwnedBy:                   ProviderID,
-				DisplayName:               rec.DisplayName,
-				ContextLength:             rec.ContextLimit,
-				MaxCompletionTokens:       rec.OutputLimit,
-				SupportedInputModalities:  rec.InputModes,
-				SupportedOutputModalities: rec.OutputModes,
-				Thinking:                  rec.Thinking,
-			})
+	for _, uc := range upstreams {
+		if uc.mgr == nil {
+			continue
 		}
+		models = append(models, modelInfos(uc.mgr.Models())...)
 	}
 	return okEnvelope(pluginapi.ModelResponse{Provider: ProviderID, Models: models}), nil
+}
+
+// handleModelsForAuth implements model.for_auth: a credential only advertises
+// the models of its own upstream. The host uses this list to decide which
+// credential may serve a model, so two channels can coexist under one
+// provider without ever routing a request to the wrong base URL.
+func (m *Manager) handleModelsForAuth(req pluginapi.AuthModelRequest) ([]byte, error) {
+	m.mu.RLock()
+	upstreams, cfg := m.upstreams, m.cfg
+	m.mu.RUnlock()
+	name := authUpstreamName(req.Attributes, req.StorageJSON, cfg)
+	models := make([]pluginapi.ModelInfo, 0)
+	if uc, ok := findUpstreamCatalog(upstreams, name); ok && uc.mgr != nil {
+		models = append(models, modelInfos(uc.mgr.Models())...)
+	}
+	debugTrace("model.for_auth upstream=%s auth_id=%s model_count=%d", name, req.AuthID, len(models))
+	return okEnvelope(pluginapi.ModelResponse{Provider: ProviderID, Models: models}), nil
+}
+
+func modelInfos(records []catalog.ModelRecord) []pluginapi.ModelInfo {
+	models := make([]pluginapi.ModelInfo, 0, len(records))
+	for _, rec := range records {
+		models = append(models, pluginapi.ModelInfo{
+			ID:                        rec.PublicID,
+			Object:                    "model",
+			OwnedBy:                   ProviderID,
+			DisplayName:               rec.DisplayName,
+			ContextLength:             rec.ContextLimit,
+			MaxCompletionTokens:       rec.OutputLimit,
+			SupportedInputModalities:  rec.InputModes,
+			SupportedOutputModalities: rec.OutputModes,
+			Thinking:                  rec.Thinking,
+		})
+	}
+	return models
+}
+
+// authUpstreamName resolves the channel an auth record belongs to. The
+// configured key→channel mapping is authoritative: a record whose stored
+// `upstream` field names a channel that no longer owns the key (renamed
+// channel, key moved between channels) must follow the config, otherwise the
+// request would go to another channel's base URL with this key. Records
+// written before multi-upstream support carry no field at all and belong to
+// the primary channel.
+func authUpstreamName(attrs map[string]string, storage []byte, cfg config.Config) string {
+	if key := strings.TrimSpace(attrs["api_key"]); key != "" {
+		for _, entry := range cfg.KeyEntries() {
+			if entry.Key.Value == key {
+				return entry.Upstream
+			}
+		}
+	}
+	if v := strings.TrimSpace(attrs["upstream"]); v != "" {
+		return v
+	}
+	if len(storage) > 0 {
+		var raw struct {
+			Upstream string `json:"upstream"`
+		}
+		if json.Unmarshal(storage, &raw) == nil && strings.TrimSpace(raw.Upstream) != "" {
+			return strings.TrimSpace(raw.Upstream)
+		}
+	}
+	return cfg.PrimaryUpstream().Name
 }
 
 // shutdownDrainTimeout bounds how long handleShutdown waits for orphaned
@@ -536,16 +650,16 @@ func (m *Manager) handleShutdown() ([]byte, error) {
 		_ = m.bridge.Log("warn", "shutdown proceeding with host callbacks still in flight", nil)
 	}
 	m.mu.Lock()
-	m.cfg, m.mgr = config.Config{}, nil
+	m.cfg, m.upstreams = config.Config{}, nil
 	m.mu.Unlock()
 	return okEnvelope(struct{}{}), nil
 }
 
 // startRefreshLoop spawns the single background ticker goroutine over the
-// caller-supplied stop/done pair (already stored under m.mu) and the served
-// catalog manager. The loop captures its own cfg/mgr/bridge snapshot so
-// it never contends on m.mu; reconfigure swaps state and restarts the loop.
-func (m *Manager) startRefreshLoop(cfg config.Config, mgr *catalog.Manager, interval time.Duration, stop, done chan struct{}) {
+// caller-supplied stop/done pair (already stored under m.mu) and every served
+// channel. The loop captures its own snapshot so it never contends on m.mu;
+// reconfigure swaps state and restarts the loop.
+func (m *Manager) startRefreshLoop(upstreams []upstreamCatalog, interval time.Duration, stop, done chan struct{}) {
 	// F4: tick refresh contexts derive from stopCtx so close(stop) aborts
 	// an in-flight Refresh immediately instead of leaving lifeMu held until
 	// the old config's request-timeout expires. The watcher goroutine is
@@ -574,7 +688,7 @@ func (m *Manager) startRefreshLoop(cfg config.Config, mgr *catalog.Manager, inte
 							_ = m.bridge.Log("error", "catalog refresh panicked", nil)
 						}
 					}()
-					refreshOnce(stopCtx, mgr, m.bridge, cfg.RequestTimeout, cfg)
+					refreshAll(stopCtx, upstreams, m.bridge, 0)
 				}()
 			}
 		}
@@ -604,33 +718,66 @@ func (m *Manager) closeStop() chan struct{} {
 // plus the full request-timeout, so close(stop) aborts an in-flight tick
 // (F4). On failure it logs a warn via host.log — error text is a redacted
 // category label from the catalog package, never key material (FR-011).
-func refreshOnce(parent context.Context, mgr *catalog.Manager, bridge *HostBridge, timeout time.Duration, cfg config.Config) error {
-	// Fallback: configured materialization input is catalog-only; CPA client
-	// authentication remains owned by its AuthProvider and CPA.
+// refreshAll refreshes every channel and returns per-channel errors keyed by
+// upstream name. A slow or broken channel never blocks the others: each one
+// gets its own bounded context.
+func refreshAll(parent context.Context, upstreams []upstreamCatalog, bridge *HostBridge, timeout time.Duration) map[string]error {
+	errs := make(map[string]error, len(upstreams))
+	for _, uc := range upstreams {
+		budget := timeout
+		if budget <= 0 {
+			budget = uc.cfg.RequestTimeout
+		}
+		errs[uc.name] = refreshOnce(parent, uc, bridge, budget)
+	}
+	return errs
+}
+
+// refreshOnce runs one bounded catalog refresh for one channel. Catalog
+// refresh is not a client request: there is no client selection, cooldown or
+// retry state. It does rotate through that channel's OWN keys, because a
+// revoked first key must not freeze the model list forever. parent
+// bounds-and-cancels the attempt: the lifecycle path passes
+// context.Background() plus registerRefreshTimeout; ticker ticks pass the
+// loop's stop-derived context plus the full request-timeout, so close(stop)
+// aborts an in-flight tick (F4). On failure it logs a warn via host.log —
+// error text is a redacted category label from the catalog package, never key
+// material (FR-011).
+func refreshOnce(parent context.Context, uc upstreamCatalog, bridge *HostBridge, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	err := mgr.Refresh(ctx, cfg.APIKeys[0].Value)
+	var err error
+	for _, key := range uc.cfg.APIKeys {
+		err = uc.mgr.Refresh(ctx, key.Value)
+		if err == nil {
+			break
+		}
+		// Try the next key of this channel; the error text never carries it.
+		if ctx.Err() != nil {
+			break
+		}
+	}
 	if err != nil {
 		if bridge != nil {
-			_ = bridge.Log("warn", "catalog refresh failed", map[string]any{"error": err.Error()})
+			_ = bridge.Log("warn", "catalog refresh failed", map[string]any{"upstream": uc.name, "error": err.Error()})
 		}
 		return err
 	}
 	// FR-010: surface normalization diagnostics with the post-refresh log.
-	warnings := mgr.Warnings()
-	if uns := mgr.Unsupported(); len(uns) > 0 {
+	warnings := uc.mgr.Warnings()
+	if uns := uc.mgr.Unsupported(); len(uns) > 0 {
 		parts := make([]string, len(uns))
 		for i, u := range uns {
 			parts[i] = fmt.Sprintf("%q: %s", u.UpstreamID, u.Reason)
 		}
-		fields := map[string]any{"models": strings.Join(parts, ", ")}
+		fields := map[string]any{"upstream": uc.name, "models": strings.Join(parts, ", ")}
 		if len(warnings) > 0 {
 			fields["warnings"] = strings.Join(warnings, "; ")
 		}
 		_ = bridge.Log("warn", "unsupported models excluded from routable catalog", fields)
 	} else if len(warnings) > 0 {
 		_ = bridge.Log("warn", "catalog normalization warnings",
-			map[string]any{"warnings": strings.Join(warnings, "; ")})
+			map[string]any{"upstream": uc.name, "warnings": strings.Join(warnings, "; ")})
 	}
 	return nil
 }

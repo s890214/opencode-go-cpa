@@ -18,7 +18,9 @@ type quotaUpstreamWindow struct {
 	ResetsAt string   `json:"resetsAt"`
 }
 
-// FetchQuota uses the credential selected by the host, never a default config key.
+// FetchQuota uses the credential selected by the host, never a default config
+// key. The credential's own upstream decides which base URL and quota path to
+// call, so every channel reports its own allowance.
 func (m *Manager) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
 	empty := pluginapi.QuotaFetchResponse{}
 	if req.Provider != ProviderID {
@@ -29,11 +31,17 @@ func (m *Manager) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchReques
 		return empty, fmt.Errorf("quota credential has no API key")
 	}
 	m.mu.RLock()
-	baseURL, quotaPath, timeout := m.cfg.BaseURL, m.cfg.QuotaPath, m.cfg.RequestTimeout
+	cfg := m.cfg
+	m.mu.RUnlock()
+	upstream, ok := cfg.UpstreamByName(authUpstreamName(req.Attributes, req.StorageJSON, cfg))
+	if !ok {
+		return empty, fmt.Errorf("quota credential belongs to an unknown upstream")
+	}
+	view := cfg.ForUpstream(upstream)
+	baseURL, quotaPath, timeout := view.BaseURL, view.QuotaPath, view.RequestTimeout
 	if quotaPath == "" {
 		quotaPath = config.DefaultQuotaPath
 	}
-	m.mu.RUnlock()
 	if m.bridge == nil {
 		return empty, fmt.Errorf("quota bridge unavailable")
 	}

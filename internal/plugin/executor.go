@@ -47,18 +47,19 @@ type executorRequest struct {
 // resolvedExecution carries everything both execution paths need after
 // model/key resolution succeeded.
 type resolvedExecution struct {
-	cfg         config.Config
-	rec         catalog.ModelRecord
-	key         string
-	tools       shared.ResponseTools
+	cfg      config.Config // single-channel view of the selected credential
+	upstream string
+	rec      catalog.ModelRecord
+	key      string
+	tools    shared.ResponseTools
 }
 
-// resolveExecution resolves the requested model against the snapshot and
-// extracts the key selected by CPA. A non-nil second return is a ready-made
-// failure envelope.
+// resolveExecution resolves the requested model against the selected
+// credential's own channel and extracts the key selected by CPA. A non-nil
+// second return is a ready-made failure envelope.
 func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []byte) {
 	m.mu.RLock()
-	cfg, mgr := m.cfg, m.mgr
+	cfg, upstreams := m.cfg, m.upstreams
 	m.mu.RUnlock()
 	if req.AuthProvider != ProviderID {
 		return nil, classEnvelope(&errclass.Error{Class: errclass.ClassAuth, Message: "selected auth provider is not opencode-go"})
@@ -68,10 +69,23 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 	if key == "" {
 		return nil, classEnvelope(&errclass.Error{Class: errclass.ClassAuth, Message: "selected auth has no api key"})
 	}
+	// The credential names its channel; the model must resolve inside that
+	// channel only. Falling back to another channel would send the request
+	// (and the key) to the wrong upstream.
+	upstreamName := authUpstreamName(req.AuthAttributes, req.StorageJSON, cfg)
+	uc, ok := findUpstreamCatalog(upstreams, upstreamName)
+	if !ok {
+		return nil, classEnvelope(&errclass.Error{
+			Class:      errclass.ClassAuth,
+			Message:    "selected auth belongs to an upstream that is no longer configured",
+			StatusCode: http.StatusConflict,
+		})
+	}
+	chanCfg := uc.cfg
 	var rec catalog.ModelRecord
 	var found bool
-	if mgr != nil && req.Model != "" {
-		rec, found = mgr.Lookup(req.Model)
+	if uc.mgr != nil && req.Model != "" {
+		rec, found = uc.mgr.Lookup(req.Model)
 	}
 	if !found {
 		return nil, classEnvelope(&errclass.Error{
@@ -86,7 +100,7 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 	// features (web_search, custom tools) intact for Responses clients.
 	// The protocol switches gate this path exactly like the catalog build,
 	// so a disabled protocol cannot re-enter through a preference entry.
-	if sourceRoute, ok := routeForSourceFormat(req.SourceFormat); ok && cfg.Protocols.Enabled(string(sourceRoute)) {
+	if sourceRoute, ok := routeForSourceFormat(req.SourceFormat); ok && chanCfg.Protocols.Enabled(string(sourceRoute)) {
 		for _, supported := range rec.SupportedProtocols {
 			if supported == sourceRoute {
 				rec.Protocol = sourceRoute
@@ -98,14 +112,14 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 				// belong to other protocols.
 				if endpoint, ok := rec.EndpointPaths[string(sourceRoute)]; ok && endpoint != "" {
 					rec.EndpointPath = endpoint
-				} else if configured := cfg.ProtocolEndpoints[string(sourceRoute)]; configured != "" {
+				} else if configured := chanCfg.ProtocolEndpoints[string(sourceRoute)]; configured != "" {
 					rec.EndpointPath = configured
 				} else {
 					rec.EndpointPath = sourceRoute.EndpointPath()
 				}
 				if m.bridge != nil {
 					_ = m.bridge.Log("debug", "pass-through selected", map[string]any{
-						"model": rec.UpstreamID, "source": req.SourceFormat,
+						"model": rec.UpstreamID, "source": req.SourceFormat, "upstream": upstreamName,
 						"protocol": string(sourceRoute), "endpoint": rec.EndpointPath,
 					})
 				}
@@ -115,7 +129,7 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 	}
 	rt := shared.NewResponseTools()
 	rt.SetReasoningShape(string(rec.ReasoningShape))
-	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *rt}, nil
+	return &resolvedExecution{cfg: chanCfg, upstream: upstreamName, rec: rec, key: key, tools: *rt}, nil
 }
 
 // routeForSourceFormat maps the inbound client protocol to an upstream route.

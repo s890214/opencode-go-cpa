@@ -31,6 +31,10 @@ type authRecord struct {
 	ID       string `json:"id,omitempty"`
 	Label    string `json:"label,omitempty"`
 	APIKey   string `json:"api_key,omitempty"`
+	// Upstream names the channel this key belongs to. Absent on records
+	// written before multi-upstream support; those belong to the primary
+	// channel.
+	Upstream string `json:"upstream,omitempty"`
 }
 
 func (p authProvider) ParseAuth(_ context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
@@ -52,16 +56,26 @@ func (p authProvider) ParseAuth(_ context.Context, req pluginapi.AuthParseReques
 	if raw.ID == "" {
 		raw.ID = req.FileName
 	}
-	debugTrace("auth parse handled provider=%s file=%s id=%s", req.Provider, req.FileName, raw.ID)
+	debugTrace("auth parse handled provider=%s file=%s id=%s upstream=%s", req.Provider, req.FileName, raw.ID, raw.Upstream)
 	return pluginapi.AuthParseResponse{Handled: true, Auth: pluginapi.AuthData{
 		Provider:    ProviderID,
 		ID:          raw.ID,
 		FileName:    req.FileName,
-		Label:       accountLabel(p.cfg, key, raw.Label, 0),
+		Label:       accountLabel(p.cfg, raw.Upstream, key, raw.Label, 0),
 		StorageJSON: req.RawJSON,
-		Attributes:  map[string]string{"api_key": key},
+		Attributes:  map[string]string{"api_key": key, "upstream": resolvedUpstreamName(p.cfg, raw.Upstream)},
 		Metadata:    map[string]any{"auth_type": "api_key"},
 	}}, nil
+}
+
+// resolvedUpstreamName falls back to the primary channel for records written
+// before multi-upstream support.
+func resolvedUpstreamName(cfg config.Config, upstream string) string {
+	upstream = strings.TrimSpace(upstream)
+	if _, ok := cfg.UpstreamByName(upstream); ok && upstream != "" {
+		return upstream
+	}
+	return cfg.PrimaryUpstream().Name
 }
 
 // errLoginUnsupported is returned by the two login entry points the
@@ -90,9 +104,15 @@ func (p authProvider) RefreshAuth(_ context.Context, req pluginapi.AuthRefreshRe
 }
 
 // Labels are presentation only. Stable auth IDs and stored host metadata are preserved.
-func accountLabel(cfg config.Config, key, existing string, fallbackIndex int) string {
+// The label doubles as the credential file name, so the primary channel keeps
+// its historical names and extra channels are named after their upstream.
+func accountLabel(cfg config.Config, upstream, key, existing string, fallbackIndex int) string {
+	view := cfg
+	if u, ok := cfg.UpstreamByName(upstream); ok {
+		view = cfg.ForUpstream(u)
+	}
 	index := fallbackIndex
-	for i, entry := range cfg.APIKeys {
+	for i, entry := range view.APIKeys {
 		if entry.Value == key {
 			if name := strings.TrimSpace(entry.Name); name != "" {
 				return name
@@ -105,8 +125,12 @@ func accountLabel(cfg config.Config, key, existing string, fallbackIndex int) st
 	if label != "" && !strings.HasPrefix(label, "OpenCode Go credential ") && !strings.HasPrefix(label, "opencode-go-key-") {
 		return label
 	}
-	if len(cfg.APIKeys) > 1 {
-		return fmt.Sprintf("OpenCode Go %d", index+1)
+	display := "OpenCode Go"
+	if name := strings.TrimSpace(upstream); name != "" && name != config.DefaultUpstreamName {
+		display = name
 	}
-	return "OpenCode Go"
+	if len(view.APIKeys) > 1 {
+		return fmt.Sprintf("%s %d", display, index+1)
+	}
+	return display
 }

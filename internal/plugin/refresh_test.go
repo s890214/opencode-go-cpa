@@ -95,20 +95,26 @@ func twoKeyFixture(t *testing.T) (config.Config, *catalog.Manager, *HostBridge, 
 	return cfg, catalog.New(cfg, bridge), bridge, rec
 }
 
-// TestRefreshUsesFirstConfiguredKey pins the Phase 5 fallback: catalog refresh
-// uses the deterministic first configured key and does not try another
-// configured key when that key fails.
-func TestRefreshUsesFirstConfiguredKey(t *testing.T) {
+// primaryUC wraps a catalog manager as the primary channel, which is what
+// refreshOnce consumes now that one plugin may serve several upstreams.
+func primaryUC(cfg config.Config, mgr *catalog.Manager) upstreamCatalog {
+	return upstreamCatalog{name: cfg.PrimaryUpstream().Name, cfg: cfg, mgr: mgr}
+}
+
+// TestRefreshRotatesKeys pins the multi-key contract: a revoked first key must
+// not freeze the catalog, so refreshOnce walks that channel's keys until one
+// answers. The auth headers stay the only place a key appears.
+func TestRefreshRotatesKeys(t *testing.T) {
 	cfg, mgr, bridge, rec := twoKeyFixture(t)
-	if err := refreshOnce(context.Background(), mgr, bridge, time.Second, cfg); err == nil {
-		t.Fatal("expected first configured key failure")
+	if err := refreshOnce(context.Background(), primaryUC(cfg, mgr), bridge, time.Second); err != nil {
+		t.Fatalf("refresh with rotation: %v", err)
 	}
 	auths := rec.seen()
-	if len(auths) != 1 || auths[0] != "Bearer "+cooledRefreshKey {
-		t.Fatalf("refresh auths = %v; want one first-key attempt", auths)
+	if len(auths) != 2 || auths[0] != "Bearer "+cooledRefreshKey || auths[1] != "Bearer "+goodRefreshKey {
+		t.Fatalf("refresh auths = %v; want first-key failure then second-key success", auths)
 	}
-	if len(mgr.Models()) != 0 {
-		t.Fatalf("failed refresh changed catalog: %+v", mgr.Models())
+	if len(mgr.Models()) == 0 {
+		t.Fatal("successful refresh left the catalog empty")
 	}
 }
 
@@ -125,7 +131,7 @@ func TestRefreshUnsupportedLogQuotesNewlineIDs(t *testing.T) {
 	rec := &authRecorder{body: []byte(`{"data":[{"id":"evil\n2027-01-01 ERROR forged host.log line"}]}`)}
 	bridge := NewHostBridge(rec.call)
 	mgr := catalog.New(cfg, bridge)
-	if err := refreshOnce(context.Background(), mgr, bridge, time.Second, cfg); err != nil {
+	if err := refreshOnce(context.Background(), primaryUC(cfg, mgr), bridge, time.Second); err != nil {
 		t.Fatalf("refreshOnce: %v", err)
 	}
 	logCalls := rec.logCalls()

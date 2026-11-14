@@ -207,28 +207,34 @@ func installFastLoop(t *testing.T, m *Manager, yamlText string) {
 	if oldDone := m.closeStop(); oldDone != nil {
 		<-oldDone
 	}
-	mgr := catalog.New(cfg, m.bridge)
+	upstreams := make([]upstreamCatalog, 0, len(cfg.Upstreams))
+	for _, u := range cfg.Upstreams {
+		view := cfg.ForUpstream(u)
+		upstreams = append(upstreams, upstreamCatalog{name: u.Name, cfg: view, mgr: catalog.New(view, m.bridge)})
+	}
 	m.mu.Lock()
-	m.cfg, m.mgr = cfg, mgr
+	m.cfg, m.upstreams = cfg, upstreams
 	stop, done := make(chan struct{}), make(chan struct{})
 	m.stop, m.done = stop, done
 	m.mu.Unlock()
-	m.startRefreshLoop(cfg, mgr, 5*time.Millisecond, stop, done)
+	m.startRefreshLoop(upstreams, 5*time.Millisecond, stop, done)
 }
 
-// manualTick runs one tick body (refreshOnce) over the currently served
-// state — exactly the work a background tick performs — without waiting out
-// the 1m config floor on refresh-interval.
+// manualTick runs one tick body (refreshAll) over the currently served state —
+// exactly the work a background tick performs — without waiting out the 1m
+// config floor on refresh-interval.
 func manualTick(t *testing.T, m *Manager) {
 	t.Helper()
 	m.mu.RLock()
-	mgr, cfg := m.mgr, m.cfg
+	upstreams := m.upstreams
 	m.mu.RUnlock()
-	if mgr == nil {
-		t.Fatal("no served manager to tick")
+	if len(upstreams) == 0 {
+		t.Fatal("no served upstream to tick")
 	}
-	if err := refreshOnce(context.Background(), mgr, m.bridge, time.Second, cfg); err != nil {
-		t.Fatalf("tick refresh: %v", err)
+	for _, uc := range upstreams {
+		if err := refreshOnce(context.Background(), uc, m.bridge, time.Second); err != nil {
+			t.Fatalf("tick refresh: %v", err)
+		}
 	}
 }
 
@@ -430,7 +436,7 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 		t.Fatalf("schema_version = %d, want %d", reg.SchemaVersion, pluginabi.SchemaVersion)
 	}
 	if reg.Metadata.Name != pluginName || reg.Metadata.Version != pluginVersion ||
-		len(reg.Metadata.ConfigFields) != 17 {
+		len(reg.Metadata.ConfigFields) != 18 {
 		t.Fatalf("metadata wrong: %+v", reg.Metadata)
 	}
 	if !reg.Capabilities.ModelProvider || !reg.Capabilities.AuthProvider {
@@ -500,6 +506,7 @@ func TestRegistrationConfigFields(t *testing.T) {
 		name string
 		typ  pluginapi.ConfigFieldType
 	}{
+		{"upstreams", pluginapi.ConfigFieldTypeArray},
 		{"api-keys", pluginapi.ConfigFieldTypeArray},
 		{"base-url", pluginapi.ConfigFieldTypeString},
 		{"catalog-path", pluginapi.ConfigFieldTypeString},
@@ -873,7 +880,7 @@ func TestShutdownClearsStateAndStopsTicker(t *testing.T) {
 		t.Fatalf("shutdown envelope = %s", resp)
 	}
 	m.mu.Lock()
-	stopped := m.stop == nil && m.done == nil && m.mgr == nil && m.cfg.BaseURL == ""
+	stopped := m.stop == nil && m.done == nil && len(m.upstreams) == 0 && m.cfg.BaseURL == ""
 	m.mu.Unlock()
 	if !stopped {
 		t.Fatal("shutdown left state behind")
@@ -1310,4 +1317,34 @@ func mustHandle(t *testing.T, m *Manager, method string, req []byte) []byte {
 		t.Fatalf("%s: %v", method, err)
 	}
 	return resp
+}
+
+// A record whose stored upstream field points at another channel must follow
+// the configured key→channel mapping: routing a key to the wrong base URL is
+// worse than reporting an unknown channel.
+func TestAuthUpstreamNameFollowsConfigKeys(t *testing.T) {
+	cfg, err := config.Load([]byte(`api-keys:
+  - value: primary-key
+upstreams:
+  - name: od
+    base-url: https://second.test/v1
+    api-keys:
+      - value: second-key
+`))
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if got := authUpstreamName(map[string]string{"api_key": "primary-key", "upstream": "od"}, nil, cfg); got != config.DefaultUpstreamName {
+		t.Fatalf("primary key routed to %q", got)
+	}
+	if got := authUpstreamName(map[string]string{"api_key": "second-key"}, nil, cfg); got != "od" {
+		t.Fatalf("second key routed to %q", got)
+	}
+	// A record for a key that is no longer configured keeps its own claim.
+	if got := authUpstreamName(nil, []byte(`{"upstream":"od"}`), cfg); got != "od" {
+		t.Fatalf("stored upstream = %q", got)
+	}
+	if got := authUpstreamName(nil, nil, cfg); got != config.DefaultUpstreamName {
+		t.Fatalf("fallback = %q", got)
+	}
 }

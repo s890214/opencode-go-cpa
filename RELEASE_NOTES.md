@@ -1,3 +1,35 @@
+## v0.7.0 — several upstream channels in one plugin
+
+### Features
+
+- A plugin instance can now serve more than one upstream. The top-level
+  `base-url` / `api-keys` / `models` remain the primary channel; each
+  `upstreams` entry adds a channel with its own host, keys, catalog path,
+  quota path, protocol endpoints, model policy and protocol switches.
+- Extra channels publish their models as `<name>/<model>`, so two vendors that
+  offer the same model ID never compete for one route. The primary keeps its
+  own `model-prefix` setting: a deployment that publishes bare model names
+  still publishes bare names.
+- Each credential is queried for quota through its own channel
+  (`base-url` + `quota-path`), so the panel and keeper show one allowance row
+  per channel instead of reusing the first upstream for everyone. A channel
+  without a usage endpoint fails only its own row.
+- Every channel keeps a separate catalog snapshot (`catalog.json` for the
+  primary, `catalog-<name>.json` for the rest), refresh loop and protocol
+  policy, so a broken or slow upstream cannot freeze the others.
+
+### Configuration notes
+
+- `upstreams` entries are **additional** channels: they never inherit the
+  primary's keys or base URL. `name` must be unique and different from the
+  primary's; `base-url` and `api-keys` are required per entry.
+- `protocol-endpoints` for an extra channel starts from the shipped defaults,
+  not from the primary's overrides — a vendor with different routes must list
+  them.
+- The channel a credential belongs to is derived from the configured
+  key→channel mapping, so moving a key between channels or renaming a channel
+  re-routes on the next reload without editing credential files.
+
 ## v0.6.6 — bridge client-executed tool_search to Chat
 
 ### Features

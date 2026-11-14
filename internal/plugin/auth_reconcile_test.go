@@ -75,9 +75,12 @@ func TestReconcileKeepsReadableFileNameAndRemovesUnknownKey(t *testing.T) {
 	}
 
 	// Removing the key from the config must delete the record: its api_key is
-	// no longer configured and its file name is one this plugin writes.
+	// no longer configured and its file name is one this plugin writes. The
+	// upstream list is the authoritative key source once Load has expanded it,
+	// so an emptied config drops both views.
 	empty := cfg
 	empty.APIKeys = nil
+	empty.Upstreams = nil
 	if err := m.reconcileAuthRecords(context.Background(), empty); err != nil {
 		t.Fatalf("reconcile after removal: %v", err)
 	}

@@ -169,6 +169,137 @@ type Config struct {
 	// MetadataURL is models.dev-style metadata (limits, reasoning options,
 	// modalities) merged underneath the upstream catalog. Empty disables it.
 	MetadataURL string
+	// Upstreams is the ordered list of upstream channels. The first entry is
+	// the primary channel and keeps the legacy field values above.
+	Upstreams []Upstream
+	// UpstreamName identifies which upstream a single-upstream view belongs
+	// to (set by ForUpstream); "" on the aggregate config.
+	UpstreamName string
+}
+
+// DefaultUpstreamName labels the upstream described by the legacy top-level
+// fields (base-url + api-keys). Extra channels must pick their own name.
+const DefaultUpstreamName = "opencode-go"
+
+// Upstream is one upstream channel: its own base URL, keys, catalog, quota
+// endpoint, protocol paths and per-model policy. Everything not listed here
+// (timeouts, allow-http, metadata feed, catalog refresh policy) is global.
+type Upstream struct {
+	Name              string
+	BaseURL           string
+	CatalogPath       string
+	QuotaPath         string
+	ModelPrefix       ModelPrefix
+	APIKeys           []APIKey
+	Models            map[string]ModelConfig
+	ProtocolEndpoints map[string]string
+	Protocols         Protocols
+	FallbackRoutes    []FallbackRoute
+}
+
+// PrimaryUpstream returns the first configured upstream. A Config built
+// without an `upstreams` block — the legacy single-channel shape, or a struct
+// literal used by callers that never ran Load — describes that one channel
+// through the top-level fields, so they are promoted here instead of resolving
+// to an empty channel that has no base URL and no keys.
+func (c Config) PrimaryUpstream() Upstream {
+	if len(c.Upstreams) == 0 {
+		return Upstream{
+			Name:              DefaultUpstreamName,
+			BaseURL:           c.BaseURL,
+			CatalogPath:       c.CatalogPath,
+			QuotaPath:         c.QuotaPath,
+			ModelPrefix:       c.ModelPrefix,
+			APIKeys:           c.APIKeys,
+			Models:            c.Models,
+			ProtocolEndpoints: c.ProtocolEndpoints,
+			Protocols:         c.Protocols,
+			FallbackRoutes:    c.FallbackRoutes,
+		}
+	}
+	return c.Upstreams[0]
+}
+
+// UpstreamByName resolves a configured upstream channel.
+func (c Config) UpstreamByName(name string) (Upstream, bool) {
+	name = strings.TrimSpace(name)
+	if len(c.Upstreams) == 0 {
+		// Single synthesised channel: the legacy name (or no name at all)
+		// resolves to it, anything else is genuinely unknown.
+		if name == "" || name == DefaultUpstreamName {
+			return c.PrimaryUpstream(), true
+		}
+		return Upstream{}, false
+	}
+	if name == "" {
+		return c.PrimaryUpstream(), true
+	}
+	for _, u := range c.Upstreams {
+		if u.Name == name {
+			return u, true
+		}
+	}
+	return Upstream{}, false
+}
+
+// KeyEntry pairs one configured key with the upstream that owns it.
+type KeyEntry struct {
+	Upstream string
+	Key      APIKey
+}
+
+// KeyEntries flattens every upstream's keys in configuration order. Without an
+// `upstreams` block the top-level keys are the primary channel's keys.
+func (c Config) KeyEntries() []KeyEntry {
+	if len(c.Upstreams) == 0 {
+		out := make([]KeyEntry, 0, len(c.APIKeys))
+		for _, k := range c.APIKeys {
+			out = append(out, KeyEntry{Upstream: DefaultUpstreamName, Key: k})
+		}
+		return out
+	}
+	out := make([]KeyEntry, 0, len(c.APIKeys))
+	for _, u := range c.Upstreams {
+		for _, k := range u.APIKeys {
+			out = append(out, KeyEntry{Upstream: u.Name, Key: k})
+		}
+	}
+	return out
+}
+
+// ForUpstream returns a single-upstream view of the config. Consumers that
+// used to read BaseURL/CatalogPath/QuotaPath/Protocols/ProtocolEndpoints/
+// Models/FallbackRoutes from one config now get the values of one channel.
+func (c Config) ForUpstream(u Upstream) Config {
+	out := c
+	out.UpstreamName = u.Name
+	out.BaseURL = u.BaseURL
+	out.APIKeys = u.APIKeys
+	out.CatalogPath = u.CatalogPath
+	out.QuotaPath = u.QuotaPath
+	out.ModelPrefix = u.ModelPrefix
+	out.Models = u.Models
+	out.ProtocolEndpoints = u.ProtocolEndpoints
+	out.Protocols = u.Protocols
+	out.FallbackRoutes = u.FallbackRoutes
+	out.Upstreams = nil
+	out.CatalogCachePath = upstreamCachePath(c.CatalogCachePath, u.Name, c.PrimaryUpstream().Name)
+	return out
+}
+
+// upstreamCachePath keeps one snapshot file per channel. The primary channel
+// keeps the legacy path so an upgrade does not cold-start the model list.
+func upstreamCachePath(base, name, primary string) string {
+	base = strings.TrimSpace(base)
+	if base == "" || name == "" || name == primary {
+		return base
+	}
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	if ext == "" {
+		ext = ".json"
+	}
+	return stem + "-" + name + ext
 }
 
 // rawConfig mirrors the YAML shape; pointer fields distinguish "unset"
@@ -193,6 +324,36 @@ type rawConfig struct {
 	MaxResponseBytes   *int64                    `yaml:"max-response-bytes"`
 	CatalogCachePath   *string                   `yaml:"catalog-cache-path"`
 	MetadataURL        *string                   `yaml:"metadata-url"`
+	// Upstreams declares additional channels. When present, the top-level
+	// base-url/api-keys describe the FIRST channel and become its defaults.
+	Upstreams []rawUpstream `yaml:"upstreams"`
+}
+
+// rawUpstream mirrors one `upstreams[]` entry. Unset fields inherit the
+// top-level values (which keeps the legacy single-channel config working).
+type rawUpstream struct {
+	Name               *string                   `yaml:"name"`
+	BaseURL            *string                   `yaml:"base-url"`
+	CatalogPath        *string                   `yaml:"catalog-path"`
+	QuotaPath          *string                   `yaml:"quota-path"`
+	ModelPrefix        rawPrefix                 `yaml:"model-prefix"`
+	APIKeys            []rawKey                  `yaml:"api-keys"`
+	Protocols          rawProtocols              `yaml:"protocols"`
+	Models             map[string]rawModelConfig `yaml:"models"`
+	ProtocolEndpoints  map[string]string         `yaml:"protocol-endpoints"`
+	FallbackRoutes     []FallbackRoute           `yaml:"fallback-routes"`
+	RouteOverrides     map[string]RouteOverride  `yaml:"route-overrides"`
+	ProtocolPreference map[string][]string       `yaml:"protocol-preference"`
+}
+
+// asRawConfig lets an upstream entry reuse mergeModels (which folds `models`
+// plus the two legacy tables).
+func (u rawUpstream) asRawConfig() rawConfig {
+	return rawConfig{
+		Models:             u.Models,
+		RouteOverrides:     u.RouteOverrides,
+		ProtocolPreference: u.ProtocolPreference,
+	}
 }
 
 // rawModelConfig mirrors one entry of the `models` block.
@@ -280,39 +441,151 @@ func Load(yamlBytes []byte) (Config, error) {
 	}
 	// Fold the `models` block and the legacy tables into one policy map.
 	models := mergeModels(raw)
+	protocols := Protocols{
+		ChatCompletions: orDefault(raw.Protocols.ChatCompletions, true),
+		Messages:        orDefault(raw.Protocols.Messages, true),
+		Responses:       orDefault(raw.Protocols.Responses, true),
+		Gemini:          orDefault(raw.Protocols.Gemini, true),
+	}
+	prefix := ModelPrefix{
+		Enabled: orDefault(raw.ModelPrefix.Enabled, true),
+		Value:   orDefault(raw.ModelPrefix.Value, DefaultModelPrefix),
+	}
+	primary := Upstream{
+		Name:              DefaultUpstreamName,
+		BaseURL:           orDefault(raw.BaseURL, DefaultBaseURL),
+		CatalogPath:       catalogPath(raw.CatalogPath),
+		QuotaPath:         quotaPath(raw.QuotaPath),
+		ModelPrefix:       prefix,
+		APIKeys:           keys,
+		Models:            models,
+		ProtocolEndpoints: protocolEndpoints(raw.ProtocolEndpoints),
+		Protocols:         protocols,
+		FallbackRoutes:    fallbackRoutes(raw.FallbackRoutes),
+	}
+	upstreams, err := buildUpstreams(raw, primary)
+	if err != nil {
+		return Config{}, err
+	}
 	c := Config{
-		BaseURL: orDefault(raw.BaseURL, DefaultBaseURL),
-		ModelPrefix: ModelPrefix{
-			Enabled: orDefault(raw.ModelPrefix.Enabled, true),
-			Value:   orDefault(raw.ModelPrefix.Value, DefaultModelPrefix),
-		},
-		APIKeys: keys,
 		Catalog: Catalog{
 			RefreshInterval:       refreshInterval,
 			StaleWhileUnavailable: orDefault(raw.Catalog.StaleWhileUnavailable, true),
 		},
-		Protocols: Protocols{
-			ChatCompletions: orDefault(raw.Protocols.ChatCompletions, true),
-			Messages:        orDefault(raw.Protocols.Messages, true),
-			Responses:       orDefault(raw.Protocols.Responses, true),
-			Gemini:          orDefault(raw.Protocols.Gemini, true),
-		},
-		Models:            models,
-		ProtocolEndpoints: protocolEndpoints(raw.ProtocolEndpoints),
-		CatalogPath:       catalogPath(raw.CatalogPath),
-		QuotaPath:         quotaPath(raw.QuotaPath),
-		FallbackRoutes:    fallbackRoutes(raw.FallbackRoutes),
 		AllowHTTP:         raw.AllowHTTP,
 		RequestTimeout:    requestTimeout,
 		StreamIdleTimeout: streamIdleTimeout,
 		MaxResponseBytes:  orDefault(raw.MaxResponseBytes, DefaultMaxResponseBytes),
 		CatalogCachePath:  cachePath,
 		MetadataURL:       metadataURL,
+		Upstreams:         upstreams,
 	}
+	// Legacy fields mirror the primary channel so existing readers keep
+	// seeing the same values they saw before multiple upstreams existed.
+	first := upstreams[0]
+	c.BaseURL = first.BaseURL
+	c.ModelPrefix = first.ModelPrefix
+	c.APIKeys = first.APIKeys
+	c.Protocols = first.Protocols
+	c.Models = first.Models
+	c.ProtocolEndpoints = first.ProtocolEndpoints
+	c.CatalogPath = first.CatalogPath
+	c.QuotaPath = first.QuotaPath
+	c.FallbackRoutes = first.FallbackRoutes
 	if err := c.validate(); err != nil {
 		return Config{}, err
 	}
 	return c, nil
+}
+
+// buildUpstreams expands the `upstreams` block. The primary channel always
+// comes from the top-level fields; every `upstreams` entry is an ADDITIONAL
+// channel and must declare its own name, base URL and keys. An entry never
+// inherits the primary's keys or base URL — a mistyped entry must not be able
+// to take over the primary credentials. Protocol policy (switch map, fallback
+// routes) and global settings stay shared unless the entry overrides them.
+func buildUpstreams(raw rawConfig, primary Upstream) ([]Upstream, error) {
+	out := make([]Upstream, 0, 1+len(raw.Upstreams))
+	out = append(out, primary)
+	seen := map[string]struct{}{primary.Name: {}}
+	for i, ru := range raw.Upstreams {
+		name := ""
+		if ru.Name != nil {
+			name = strings.TrimSpace(*ru.Name)
+		}
+		if name == "" {
+			return nil, fmt.Errorf("upstreams[%d].name: name is required for extra upstreams", i)
+		}
+		if _, dup := seen[name]; dup {
+			return nil, fmt.Errorf("upstreams[%d].name: %q is already used by another channel", i, name)
+		}
+		seen[name] = struct{}{}
+
+		baseURL := ""
+		if ru.BaseURL != nil {
+			baseURL = strings.TrimSpace(*ru.BaseURL)
+		}
+		keys := make([]APIKey, 0, len(ru.APIKeys))
+		for _, entry := range ru.APIKeys {
+			keys = append(keys, APIKey{Value: os.ExpandEnv(entry.Value), Name: strings.TrimSpace(entry.Name)})
+		}
+		// Endpoints start from the shipped defaults: a second channel of the
+		// same family needs no endpoint block, a different vendor overrides
+		// every path it disagrees with.
+		u := Upstream{
+			Name:              name,
+			BaseURL:           baseURL,
+			CatalogPath:       catalogPath(ru.CatalogPath),
+			QuotaPath:         quotaPath(ru.QuotaPath),
+			ModelPrefix:       ModelPrefix{Enabled: true, Value: name},
+			APIKeys:           keys,
+			Models:            nil,
+			ProtocolEndpoints: protocolEndpoints(nil),
+			Protocols:         mergeProtocols(ru.Protocols, primary.Protocols),
+			FallbackRoutes:    primary.FallbackRoutes,
+		}
+		// An extra channel cannot opt out of its prefix: two channels must
+		// never publish the same model ID, because the host keeps one
+		// executor per model and would drop this channel's models while
+		// mixing credentials. `model-prefix.enabled: false` is ignored here
+		// and only `value` is honoured.
+		if ru.ModelPrefix.Value != nil && strings.TrimSpace(*ru.ModelPrefix.Value) != "" {
+			u.ModelPrefix.Value = strings.TrimSpace(*ru.ModelPrefix.Value)
+		}
+		if len(ru.ProtocolEndpoints) > 0 {
+			merged := protocolEndpoints(nil)
+			for k, v := range protocolEndpoints(ru.ProtocolEndpoints) {
+				merged[k] = v
+			}
+			u.ProtocolEndpoints = merged
+		}
+		if len(ru.Models) > 0 || len(ru.RouteOverrides) > 0 || len(ru.ProtocolPreference) > 0 {
+			u.Models = mergeModels(ru.asRawConfig())
+		}
+		if ru.FallbackRoutes != nil {
+			u.FallbackRoutes = fallbackRoutes(ru.FallbackRoutes)
+		}
+		out = append(out, u)
+	}
+	return out, nil
+}
+
+// mergeProtocols overlays explicitly-set protocol switches on the inherited
+// defaults.
+func mergeProtocols(raw rawProtocols, base Protocols) Protocols {
+	if raw.ChatCompletions != nil {
+		base.ChatCompletions = *raw.ChatCompletions
+	}
+	if raw.Messages != nil {
+		base.Messages = *raw.Messages
+	}
+	if raw.Responses != nil {
+		base.Responses = *raw.Responses
+	}
+	if raw.Gemini != nil {
+		base.Gemini = *raw.Gemini
+	}
+	return base
 }
 
 // DefaultCatalogPath is where the model catalog sits under base-url. It is
@@ -501,6 +774,62 @@ func PublicID(c Config, upstreamID string) string {
 }
 
 func (c Config) validate() error {
+	if c.Catalog.RefreshInterval < time.Minute {
+		return fmt.Errorf("catalog.refresh-interval: must be at least 1m")
+	}
+	if c.MaxResponseBytes <= 0 {
+		return fmt.Errorf("max-response-bytes: must be positive")
+	}
+	if c.MetadataURL != "" {
+		if err := validateURL("metadata-url", c.MetadataURL, c.AllowHTTP); err != nil {
+			return err
+		}
+	}
+	if c.CatalogCachePath != "" && !filepath.IsAbs(c.CatalogCachePath) {
+		return fmt.Errorf("catalog-cache-path: must be absolute")
+	}
+	if len(c.Upstreams) == 0 {
+		return fmt.Errorf("upstreams: at least one upstream is required")
+	}
+	names := make(map[string]bool, len(c.Upstreams))
+	for _, u := range c.Upstreams {
+		if !validUpstreamName(u.Name) {
+			return fmt.Errorf("upstreams: invalid upstream name %q (letters, digits, dot, dash and underscore only)", u.Name)
+		}
+		if names[u.Name] {
+			return fmt.Errorf("upstreams: duplicate upstream name %q", u.Name)
+		}
+		names[u.Name] = true
+		if err := c.ForUpstream(u).validateUpstream(); err != nil {
+			if len(c.Upstreams) == 1 {
+				// Keep the historical single-channel messages unchanged.
+				return err
+			}
+			return fmt.Errorf("upstreams[%s]: %w", u.Name, err)
+		}
+	}
+	return nil
+}
+
+// validUpstreamName keeps channel names usable in auth labels, file names and
+// model prefixes.
+func validUpstreamName(name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validateUpstream checks one channel view (base URL, keys, paths, policy).
+func (c Config) validateUpstream() error {
 	if err := validateURL("base-url", c.BaseURL, c.AllowHTTP); err != nil {
 		return err
 	}
@@ -519,25 +848,11 @@ func (c Config) validate() error {
 		}
 		seen[k.Value] = true
 	}
-	if c.Catalog.RefreshInterval < time.Minute {
-		return fmt.Errorf("catalog.refresh-interval: must be at least 1m")
-	}
-	if c.MaxResponseBytes <= 0 {
-		return fmt.Errorf("max-response-bytes: must be positive")
-	}
 	if c.CatalogPath != "" && !strings.HasPrefix(c.CatalogPath, "/") {
 		return fmt.Errorf("catalog-path: must start with /")
 	}
 	if c.QuotaPath != "" && !strings.HasPrefix(c.QuotaPath, "/") {
 		return fmt.Errorf("quota-path: must start with /")
-	}
-	if c.MetadataURL != "" {
-		if err := validateURL("metadata-url", c.MetadataURL, c.AllowHTTP); err != nil {
-			return err
-		}
-	}
-	if c.CatalogCachePath != "" && !filepath.IsAbs(c.CatalogCachePath) {
-		return fmt.Errorf("catalog-cache-path: must be absolute")
 	}
 	for protocol, path := range c.ProtocolEndpoints {
 		if !validProtocols[protocol] {

@@ -186,6 +186,7 @@ plugins:
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `api-keys` | `[]object` | *(Required)* | List of API keys (`- value: "..."`, optional `name: "Personal"`). Supports `${ENV_VAR}` expansion. Duplicates and empty values are rejected. |
+| `upstreams` | `[]object` | `[]` | Additional upstream channels served next to the primary (top-level) one. Each entry needs `name`, `base-url` and its own `api-keys`; it never inherits the primary's keys or base URL. Models are published as `<name>/<model>` so they cannot collide. See [Multiple upstream channels](#multiple-upstream-channels). |
 | `base-url` | `string` | `https://opencode.ai/inference/go` | Upstream service root. Every path below appends to it verbatim. Must be valid HTTPS (or HTTP if `allow-http: true`) without query parameters, fragments, or userinfo. |
 | `protocol-endpoints` | `map` | `/v1/{chat/completions,responses,messages}` | Path of each protocol, appended to `base-url`. Change these when the upstream moves an endpoint. |
 | `quota-path` | `string` | `/v1/usage` | Usage/quota endpoint, relative to `base-url`. Separate from the protocol endpoints. |
@@ -210,6 +211,63 @@ plugins:
 | `max-response-bytes` | `int64` | `67108864` (64 MiB) | Maximum non-streaming response body size in bytes. |
 | `allow-http` | `bool` | `false` | When `true`, permits `http://` scheme in `base-url` for local testing. |
 | `metadata-url` | `string` | `https://models.opencode.ai/api.json` | models.dev-style metadata feed. The upstream model list only returns IDs, so this fills context/output limits, modalities and thinking levels. Upstream values always win; metadata only fills gaps. Fetched in the background; failures are ignored. |
+
+## Multiple upstream channels
+
+One plugin instance can serve several upstreams. The top-level `base-url` /
+`api-keys` / `models` stay the **primary** channel; every `upstreams` entry is an
+**additional** channel with its own host and credentials:
+
+```yaml
+base-url: "https://opencode.ai/inference/go"
+protocol-endpoints:
+  chat-completions: "/openai/v1/chat/completions"
+  responses: "/openai/v1/responses"
+  messages: "/anthropic/v1/messages"
+api-keys:
+  - value: "${OPENCODE_GO_API_KEY}"
+
+upstreams:
+  - name: od                       # required, unique, used as the model prefix
+    base-url: "https://second-vendor.example/v1"
+    catalog-path: "/models"        # default /v1/models
+    quota-path: "/usage"           # default /v1/usage
+    protocol-endpoints:            # defaults to the shipped paths; override per vendor
+      chat-completions: "/chat/completions"
+      responses: "/responses"
+      messages: "/messages"
+    models:                        # only needed for IDs no family prefix matches
+      some-model-id:
+        protocols: ["chat-completions"]
+    api-keys:
+      - value: "${SECOND_VENDOR_KEY}"
+        name: Second
+```
+
+Rules that matter:
+
+- **A channel owns its credentials.** An entry never inherits the primary's
+  keys or base URL, so a mistyped entry cannot take over the primary
+  credentials. Base URL and keys are required per entry; `name` must be unique.
+- **Model IDs are namespaced.** Extra channels always publish `<name>/<model>`
+  (`model-prefix.enabled: false` is ignored there, only `value` is honoured),
+  because the host keeps one executor per model ID: an unprefixed duplicate
+  would silently drop that channel's models and mix credentials. The primary
+  keeps its own `model-prefix` setting, so a deployment that publishes bare
+  names (`model-prefix.enabled: false`) keeps doing exactly that.
+- **Routing follows the configured key→channel mapping**, not a stored field:
+  moving a key between channels or renaming a channel re-routes on the next
+  reload without touching credential files.
+- **Each credential reports its own quota.** The quota call uses the credential's
+  channel `base-url` + `quota-path`, so every row in the panel/keeper shows that
+  channel's allowance. A channel whose upstream has no usage endpoint (or a
+  different response shape) logs a failure for its own row only; the others are
+  unaffected.
+- **Model list per channel.** Each channel keeps its own catalog snapshot
+  (primary: `catalog.json`, extra: `catalog-<name>.json`), refresh cadence and
+  protocol policy. A model that neither `models` nor `fallback-routes` can route
+  is still excluded from the catalog — list it under that channel's `models`
+  when its ID matches no family prefix.
 
 ## Testing
 
