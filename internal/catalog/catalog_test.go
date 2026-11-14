@@ -45,8 +45,6 @@ func testCfg() config.Config {
 		CatalogPath:      "/v1/models",
 		ModelPrefix:      config.ModelPrefix{Enabled: true, Value: "opencode-go"},
 		MaxResponseBytes: 1 << 20,
-		Catalog:          config.Catalog{StaleWhileUnavailable: true},
-		Protocols:        config.Protocols{ChatCompletions: true, Messages: true, Responses: true},
 	}
 }
 
@@ -425,29 +423,26 @@ func TestRefreshNilClientClassifiedError(t *testing.T) {
 	}
 }
 
-func TestRefreshErrorClearsWhenNoStale(t *testing.T) {
+// TestRefreshErrorKeepsStaleSnapshot pins the single stale policy: a failed
+// refresh keeps the last good snapshot in place instead of wiping it, because
+// "no models at all" is never better than what the vendor advertised a minute
+// ago.
+func TestRefreshErrorKeepsStaleSnapshot(t *testing.T) {
 	cfg := testCfg()
-	cfg.Catalog.StaleWhileUnavailable = false
 	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[{"id":"gpt-5.6-luna"}]}`)}}
 	m := newManager(cfg, fc)
 	seedGoodSnapshot(t, m)
 
 	fc.resp = pluginapi.HTTPResponse{StatusCode: 503}
-	clearErr := m.Refresh(context.Background(), testKey)
-	if clearErr == nil || !strings.Contains(clearErr.Error(), "http 503") {
-		t.Fatalf("clear-path error = %v, want http 503 category", clearErr)
+	refreshErr := m.Refresh(context.Background(), testKey)
+	if refreshErr == nil || !strings.Contains(refreshErr.Error(), "http 503") {
+		t.Fatalf("refresh error = %v, want http 503 category", refreshErr)
 	}
-	if got := m.Models(); len(got) != 0 {
-		t.Errorf("routable set not cleared: %+v", got)
-	}
-	if got := m.Unsupported(); len(got) != 0 {
-		t.Errorf("diagnostics not cleared: %+v", got)
-	}
-	if got := m.Warnings(); len(got) != 0 {
-		t.Errorf("warnings not cleared: %+v", got)
+	if got := m.Models(); len(got) == 0 {
+		t.Fatalf("last good snapshot was dropped on a failed refresh")
 	}
 
-	// Next success restores the routable set.
+	// Next success replaces it.
 	fc.err = nil
 	fc.resp = pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[{"id":"glm-5.2"}]}`)}
 	mustRefresh(t, m)
@@ -645,81 +640,6 @@ func TestConcurrentRefreshAndReads(t *testing.T) {
 	readerWG.Wait()
 }
 
-func TestProtocolFlagsExcludeRoutes(t *testing.T) {
-	catalogBody := `{"data":[
-		{"id":"glm-5.2"},
-		{"id":"qwen3.7-max"},
-		{"id":"gpt-5.6-luna"}
-	]}`
-	routes := []struct {
-		protocol  string
-		field     func(p config.Protocols) bool
-		excluded  string
-		routableA string
-		routableB string
-	}{
-		{"chat-completions", func(p config.Protocols) bool { return p.ChatCompletions }, "glm-5.2", "qwen3.7-max", "gpt-5.6-luna"},
-		{"messages", func(p config.Protocols) bool { return p.Messages }, "qwen3.7-max", "glm-5.2", "gpt-5.6-luna"},
-		{"responses", func(p config.Protocols) bool { return p.Responses }, "gpt-5.6-luna", "glm-5.2", "qwen3.7-max"},
-	}
-	for _, tc := range routes {
-		t.Run(tc.protocol, func(t *testing.T) {
-			cfg := testCfg()
-			switch tc.protocol {
-			case "chat-completions":
-				cfg.Protocols.ChatCompletions = false
-			case "messages":
-				cfg.Protocols.Messages = false
-			case "responses":
-				cfg.Protocols.Responses = false
-			}
-			fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(catalogBody)}}
-			m := newManager(cfg, fc)
-			mustRefresh(t, m)
-
-			models := m.Models()
-			for _, mo := range models {
-				if mo.UpstreamID == tc.excluded {
-					t.Errorf("disabled-protocol model %q still routable: %+v", tc.excluded, mo)
-				}
-			}
-			findModel(t, models, tc.routableA)
-			findModel(t, models, tc.routableB)
-
-			unsup := m.Unsupported()
-			if len(unsup) != 1 || unsup[0].UpstreamID != tc.excluded ||
-				unsup[0].Reason != fmt.Sprintf("protocol %s disabled by config", map[string]Route{
-					"chat-completions": RouteChatCompletions,
-					"messages":         RouteMessages,
-					"responses":        RouteResponses,
-				}[tc.protocol]) {
-				t.Fatalf("unsupported = %+v, want %q excluded with disabled-reason", unsup, tc.excluded)
-			}
-		})
-	}
-}
-
-func TestProtocolFlagsAllOnKeepsEverything(t *testing.T) {
-	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[
-		{"id":"glm-5.2"},{"id":"qwen3.7-max"},{"id":"gpt-5.6-luna"}
-	]}`)}}
-	m := newManager(testCfg(), fc)
-	mustRefresh(t, m)
-	if got := len(m.Models()); got != 3 {
-		t.Fatalf("models = %d, want all three routable with default flags", got)
-	}
-	if len(m.Unsupported()) != 0 {
-		t.Fatalf("unexpected unsupported entries: %+v", m.Unsupported())
-	}
-}
-
-func TestProtocolEnabledUnknownRouteDefaultsTrue(t *testing.T) {
-	m := newManager(testCfg(), &fakeClient{})
-	if !m.protocolEnabled(Route("bogus")) {
-		t.Fatal("unknown routes must default to enabled")
-	}
-}
-
 // TestOverrideApplicationRecordedInWarnings pins spec 04 §5: an applied
 // user route override MUST be visible in diagnostics.
 func TestOverrideApplicationRecordedInWarnings(t *testing.T) {
@@ -781,9 +701,10 @@ func TestEndpointEscapesBase(t *testing.T) {
 	}
 }
 
-func TestFailClearsLookupIndex(t *testing.T) {
+// TestFailKeepsLookupIndex pins that a failed refresh leaves Lookup able to
+// resolve the IDs of the snapshot still being served.
+func TestFailKeepsLookupIndex(t *testing.T) {
 	cfg := testCfg()
-	cfg.Catalog.StaleWhileUnavailable = false
 	fc := &fakeClient{resp: pluginapi.HTTPResponse{
 		StatusCode: 200,
 		Body:       []byte(`{"data":[{"id":"glm-5.2"}]}`),
@@ -798,54 +719,12 @@ func TestFailClearsLookupIndex(t *testing.T) {
 	if err := m.Refresh(context.Background(), testKey); err == nil {
 		t.Fatal("expected refresh failure")
 	}
-	if got := m.Models(); len(got) != 0 {
-		t.Fatalf("models not cleared: %+v", got)
+	if got := m.Models(); len(got) == 0 {
+		t.Fatalf("models dropped: %+v", got)
 	}
-	// FR-002: a cleared snapshot must stop resolving previously-valid IDs.
-	if _, ok := m.Lookup("glm-5.2"); ok {
-		t.Fatal("Lookup still resolves IDs from the cleared snapshot")
+	if _, ok := m.Lookup("glm-5.2"); !ok {
+		t.Fatal("Lookup lost a model that is still served")
 	}
-}
-
-// TestSeedFromAppliesProtocolKillSwitch pins the seed-revalidation fix: a
-// protocol disabled between snapshots must demote its routed records at
-// seed time. Otherwise an operator flipping protocols.messages=false during
-// a catalog outage keeps serving messages-routed models off the stale
-// snapshot until a refresh succeeds — the kill-switch is inert exactly when
-// it needs to bite.
-func TestSeedFromAppliesProtocolKillSwitch(t *testing.T) {
-	body := `{"data":[{"id":"minimax-m3"},{"id":"glm-5.2"}]}`
-	prev := newManager(testCfg(), &fakeClient{resp: pluginapi.HTTPResponse{
-		StatusCode: 200,
-		Body:       []byte(body),
-	}})
-	mustRefresh(t, prev)
-	findModel(t, prev.Models(), "minimax-m3") // precondition: routable pre-seed
-
-	cfg := testCfg()
-	cfg.Protocols.Messages = false
-	m := newManager(cfg, &fakeClient{})
-	m.SeedFrom(prev)
-
-	for _, mo := range m.Models() {
-		if mo.Protocol == RouteMessages {
-			t.Fatalf("disabled-protocol record still routable after seed: %+v", mo)
-		}
-	}
-	findModel(t, m.Models(), "glm-5.2") // unaffected route keeps serving
-	if _, ok := m.Lookup("minimax-m3"); ok {
-		t.Fatal("disabled-protocol record must not resolve via Lookup")
-	}
-	var found bool
-	for _, u := range m.Unsupported() {
-		if u.UpstreamID == "minimax-m3" && u.Reason == "protocol messages disabled by config" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("unsupported = %+v, want minimax-m3 demotion diagnostic", m.Unsupported())
-	}
-	findModel(t, prev.Models(), "minimax-m3") // seeding must not mutate prev
 }
 
 // TestSeedFromRecomputesPublicIDsUnderNewPrefix pins prefix recomputation at
@@ -1057,7 +936,6 @@ func TestFallbackRoutesNilUsesBuiltinTable(t *testing.T) {
 
 func TestGeminiFamilyRoutesToGenerateContent(t *testing.T) {
 	cfg := testCfg()
-	cfg.Protocols.Gemini = true
 	fc := &fakeClient{}
 	fc.set(pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[
 		{"id":"gemini-4-argon"},
@@ -1090,29 +968,8 @@ func TestGeminiFamilyRoutesToGenerateContent(t *testing.T) {
 	}
 }
 
-func TestGeminiFamilyHonoursProtocolSwitch(t *testing.T) {
-	cfg := testCfg() // Gemini defaults to false in this fixture
-	fc := &fakeClient{}
-	fc.set(pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[{"id":"gemini-4-argon"}]}`)}, nil)
-	m := newManager(cfg, fc)
-	mustRefresh(t, m)
-	if len(m.Models()) != 0 {
-		t.Fatalf("gemini models must be excluded when protocols.gemini is off: %+v", m.Models())
-	}
-	var reason string
-	for _, u := range m.Unsupported() {
-		if u.UpstreamID == "gemini-4-argon" {
-			reason = u.Reason
-		}
-	}
-	if !strings.Contains(reason, "gemini") {
-		t.Fatalf("diagnostic = %q, want a gemini protocol note", reason)
-	}
-}
-
 func TestCatalogCachePersistsAndRestores(t *testing.T) {
 	cfg := testCfg()
-	cfg.Protocols.Gemini = true
 	fc := &fakeClient{}
 	fc.set(pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[{"id":"deepseek-v4-pro"},{"id":"gemini-4-argon"}]}`)}, nil)
 	m := newManager(cfg, fc)

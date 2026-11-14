@@ -73,202 +73,141 @@ Place the compiled binary into your CLIProxyAPI plugin directory (e.g. `<cliprox
 
 ## Configuration
 
-Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.opencode-go-cpa`:
+Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.opencode-go-cpa`.
+There is exactly **one** place a channel can be declared: the `upstreams` list.
+The first entry is the default channel CPA picks when a model name carries no
+prefix; nothing is inherited between entries.
 
-> Upgrading from 0.5: `base-url` is now the service root, not the versioned
-> root. If your config has `base-url: .../v1`, drop the trailing `/v1` and
-> spell the full protocol paths in `protocol-endpoints`; the join is verbatim,
-> so leaving both produces `/v1/v1/...`.
+> Upgrading from 0.7 and earlier: the top-level `base-url`, `api-keys`,
+> `models`, `protocol-endpoints`, `catalog-path`, `quota-path`, `model-prefix`,
+> `messages-auth` and `fallback-routes` keys are gone — move each channel's
+> values into its `upstreams` entry. `protocols.*`, `route-overrides`,
+> `protocol-preference` (`models` covers them) and
+> `catalog.stale-while-unavailable` (the last good snapshot is always kept) were
+> removed. A config that still uses the old shape fails to load with
+> `upstreams: at least one channel is required` instead of silently serving
+> nothing.
 
 ```yaml
 plugins:
   configs:
     opencode-go-cpa:
-      # Upstream service root (default: "https://opencode.ai/inference/go").
-      # Every other path below is appended to it verbatim.
-      base-url: "https://opencode.ai/inference/go"
-
-      # Where each protocol lives, appended to base-url as-is.
-      # Defaults are the upstream's generic paths; the documented layout is
-      # chat/responses under /openai/v1/ and messages under /anthropic/v1/.
-      protocol-endpoints:
-        chat-completions: "/openai/v1/chat/completions"
-        responses: "/openai/v1/responses"
-        messages: "/anthropic/v1/messages"
-
-      # Usage/quota endpoint (default: "/v1/usage"). Not a protocol endpoint,
-      # so it has its own setting.
-      # quota-path: "/v1/usage"
-
-      # Catalog discovery path (default: "/v1/models"), relative to base-url.
-      # Also separate, because the upstream serves the model list outside the
-      # protocol paths.
-      # catalog-path: "/v1/models"
-
-      # Client-facing model ID prefix configuration
-      model-prefix:
-        enabled: true           # true -> "opencode-go/<model>", false -> bare "<model>" (default: true)
-        value: "opencode-go"    # prefix name (default: "opencode-go")
-
-      # OpenCode Go API keys (at least one required). Supports ${ENV_VAR} expansion.
-      api-keys:
-        - value: "sk-opencode-key-1"
-          name: "Personal"      # optional account label
-        - value: "sk-opencode-key-2"
-        - value: "${OPENCODE_GO_API_KEY}"
-
-      # Catalog discovery settings
-      catalog:
-        refresh-interval: "15m"          # discovery refresh cadence, min "1m" (default: "15m")
-        stale-while-unavailable: true    # retain last good catalog snapshot on refresh failure (default: true)
-
-      # Per-model policy. One entry per model:
-      #   protocols        protocols the upstream speaks natively, in priority
-      #                    order — the first one is the default route. A client
-      #                    whose protocol appears here is passed through with
-      #                    no translation at all.
-      #   reasoning-shape  "summary" (default) or "content". Upstreams disagree
-      #                    and answer 400/503 for the wrong one; measured:
-      #                    deepseek-v4-pro wants content, deepseek-v4.1-flash
-      #                    and glm want summary.
-      #   endpoints        optional per-protocol path override. Only needed
-      #                    when a protocol lives somewhere other than its
-      #                    default path.
-      models:
-        deepseek-v4.1-flash:
-          protocols: ["chat-completions", "responses", "messages"]
-        deepseek-v4-pro:
-          protocols: ["chat-completions", "responses", "messages"]
-          reasoning-shape: "content"
-        claude-haiku-5-5:
-          protocols: ["messages"]
-        "custom-proxy-model":
-          protocols: ["chat-completions", "responses"]
-          endpoints:
-            responses: "/openai/v1/responses"   # must start with /
-
-      # Optional family fallback for models not listed above. Omit this key to
-      # use the built-in family table; set `fallback-routes: []` to disable
-      # guessing entirely.
-      fallback-routes:
-        - { prefix: "gpt", protocol: "responses" }
-        - { prefix: "glm", protocol: "chat-completions" }
-
-      # Legacy shortcut: a single-protocol model can be written as
-      #   some-model: { protocols: [messages], endpoint: "/v1/messages" }
-      # The old `protocol-preference` and `route-overrides` tables still load
-      # and are merged into `models`, so existing configs keep working.
-
-      # Protocol enable/disable switches (all default to true)
-      protocols:
-        chat-completions: true   # enables models routed to /v1/chat/completions
-        messages: true           # enables models routed to /v1/messages
-        responses: true          # enables models routed to /v1/responses
-        gemini: true             # enables models routed to /google/v1beta/models
-
-      # Execution settings
-      request-timeout: "5m"              # total upstream request budget (default: "5m")
-      stream-idle-timeout: "5m"          # max silence between stream chunks (default: "5m")
-      max-response-bytes: 67108864       # max non-streaming response body size in bytes (default: 64 MiB)
-      allow-http: false                  # allow http:// scheme for local mock/testing (default: false)
-
-      # Optional: last-good catalog snapshot, served before the first refresh
-      # completes (default: <user-cache-dir>/opencode-go/catalog.json)
-      # catalog-cache-path: "/var/lib/cliproxyapi/opencode-go-catalog.json"
-
-      # Optional: models.dev metadata used to fill limits/modalities/thinking
-      # levels the upstream catalog omits
+      # ---- global settings (one per plugin instance) ----
+      request-timeout: "5m"            # total upstream request budget
+      stream-idle-timeout: "5m"        # max silence between stream chunks
+      max-response-bytes: 67108864     # max non-streaming body (64 MiB)
+      catalog-refresh-interval: "15m"  # model catalog poll cadence, min "1m"
+      # catalog-cache-path: "/var/lib/cliproxyapi/opencode-go/catalog.json"
       # metadata-url: "https://models.opencode.ai/api.json"
+      allow-http: false                # http:// upstreams for local testing only
+
+      # ---- channels: one entry per upstream, first = default ----
+      upstreams:
+        - name: "opencode-go"          # required, unique, model-ID prefix
+          base-url: "https://opencode.ai/inference/go"
+                                       # omitted -> the default vendor above
+          catalog-path: "/v1/models"   # default
+          quota-path: "/v1/usage"      # default
+          model-prefix:
+            enabled: true              # false -> bare model IDs (one channel only)
+            value: "opencode-go"       # defaults to `name`
+          messages-auth: "x-api-key"   # or "bearer" for a bearer-only gateway
+          protocol-endpoints:          # appended to base-url verbatim
+            chat-completions: "/openai/v1/chat/completions"
+            responses: "/openai/v1/responses"
+            messages: "/anthropic/v1/messages"
+          api-keys:                    # at least one; ${ENV_VAR} expands
+            - value: "${OPENCODE_GO_API_KEY}"
+              name: "Personal"         # optional account label
+          # Per-model policy: `protocols` is ordered, the first entry is the
+          # default route, and a client whose protocol is listed here is passed
+          # through with no translation. `reasoning-shape` is "summary"
+          # (default) or "content"; `endpoints` pins a path per protocol.
+          models:
+            deepseek-v4.1-flash:
+              protocols: ["chat-completions", "responses", "messages"]
+            deepseek-v4-pro:
+              protocols: ["chat-completions", "responses", "messages"]
+              reasoning-shape: "content"
+          # Family fallback for models `models` does not list. Omit the key to
+          # use the built-in table; `fallback-routes: []` disables guessing.
+          fallback-routes:
+            - { prefix: "gpt", protocol: "responses" }
+            - { prefix: "glm", protocol: "chat-completions" }
 ```
 
 ### Configuration Options
 
+Global (one per plugin instance):
+
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `api-keys` | `[]object` | *(Required)* | List of API keys (`- value: "..."`, optional `name: "Personal"`). Supports `${ENV_VAR}` expansion. Duplicates and empty values are rejected. |
-| `upstreams` | `[]object` | `[]` | Additional upstream channels served next to the primary (top-level) one. Each entry needs `name`, `base-url` and its own `api-keys`; it never inherits the primary's keys or base URL. Models are published as `<name>/<model>` so they cannot collide. See [Multiple upstream channels](#multiple-upstream-channels). |
-| `base-url` | `string` | `https://opencode.ai/inference/go` | Upstream service root. Every path below appends to it verbatim. Must be valid HTTPS (or HTTP if `allow-http: true`) without query parameters, fragments, or userinfo. |
-| `protocol-endpoints` | `map` | `/v1/{chat/completions,responses,messages}` | Path of each protocol, appended to `base-url`. Change these when the upstream moves an endpoint. |
-| `quota-path` | `string` | `/v1/usage` | Usage/quota endpoint, relative to `base-url`. Separate from the protocol endpoints. |
-| `catalog-path` | `string` | `/v1/models` | Model catalog endpoint, relative to `base-url`. Separate from the protocol endpoints because the upstream serves the model list on its own path. |
-| `messages-auth` | `string` | `x-api-key` | Header the Messages route authenticates with. `bearer` is for an Anthropic-wire gateway that rejects `x-api-key` (e.g. OpenDesign). Per channel: extra channels default to `x-api-key` and never inherit the primary's value. |
-| `model-prefix.enabled` | `bool` | `true` | When `true`, client-facing model names use `<prefix>/<model>`. When `false`, uses bare model IDs. |
-| `model-prefix.value` | `string` | `opencode-go` | Provider prefix string when prefixing is enabled. |
-| `catalog.refresh-interval` | `duration` | `15m` | Interval between catalog polling refreshes (e.g. `15m`, `1h`). Minimum is `1m`. |
-| `catalog.stale-while-unavailable` | `bool` | `true` | When `true`, serves the last valid catalog snapshot if an update fails. |
-| `protocols.chat-completions` | `bool` | `true` | Protocol switch for Chat Completions endpoints. |
-| `protocols.messages` | `bool` | `true` | Protocol switch for Messages endpoints. |
-| `protocols.responses` | `bool` | `true` | Protocol switch for Responses endpoints. |
-| `protocols.gemini` | `bool` | `true` | Protocol switch for models routed to the Gemini `generateContent` endpoint (`/google/v1beta/models`). Gemini is an upstream route only: clients still speak chat/messages/responses. |
-| `models` | `map` | `{}` | Per-model policy: `protocols` (ordered, first = default route), `reasoning-shape` (`summary` \| `content`), `endpoints` (per-protocol path override). A model listed here owns its route outright. |
-| `fallback-routes` | `[]object` | *(built-in table)* | Family prefixes for models `models` does not list (`{prefix, protocol}`, first match wins). Omit the key to use the built-in table; `[]` disables guessing. |
-| `models.<id>.reasoning-shape` | `string` | `summary` | Wire form of the reasoning item on the Responses route. `deepseek-v4-pro` needs `content`; every other measured model needs `summary` (or answers 503 for `content`). |
-| `models.<id>.endpoints` | `map` | `{}` | Optional path override per protocol; only needed when a protocol is not served at its default path. |
-| `protocol-preference` | `map` | `{}` | Legacy: protocols a model speaks natively. Merged into `models`. |
-| `route-overrides` | `map` | `{}` | Legacy: `{ protocol, endpoint }` per model, where `protocol` also becomes the default route. Merged into `models`. |
+| `upstreams` | `[]object` | *(Required)* | Every channel, first entry = default. See the per-channel table below. |
 | `request-timeout` | `duration` | `5m` | Total upstream HTTP request budget. Must be positive. |
-| `stream-idle-timeout` | `duration` | `5m` | Maximum silence between stream chunks before the stream is closed. A long answer that keeps streaming is never cut; only a stalled upstream trips it. Must be positive. |
-| `catalog-cache-path` | `string` | `<user-cache-dir>/opencode-go/catalog.json` | Absolute path of the last-good catalog snapshot. It is served immediately at startup, before the first refresh, so a catalog outage at boot does not expose an empty model list. |
+| `stream-idle-timeout` | `duration` | `5m` | Maximum silence between stream chunks before the stream is closed. A long answer that keeps streaming is never cut; only a stalled upstream trips it. |
 | `max-response-bytes` | `int64` | `67108864` (64 MiB) | Maximum non-streaming response body size in bytes. |
-| `allow-http` | `bool` | `false` | When `true`, permits `http://` scheme in `base-url` for local testing. |
-| `metadata-url` | `string` | `https://models.opencode.ai/api.json` | models.dev-style metadata feed. The upstream model list only returns IDs, so this fills context/output limits, modalities and thinking levels. Upstream values always win; metadata only fills gaps. Fetched in the background; failures are ignored. |
+| `catalog-refresh-interval` | `duration` | `15m` | Model catalog poll cadence per channel. Minimum `1m`. |
+| `catalog-cache-path` | `string` | `<user-cache-dir>/opencode-go/catalog.json` | Absolute path of the last-good catalog snapshot (one file per channel). Served immediately at startup, so a catalog outage at boot does not expose an empty model list. |
+| `metadata-url` | `string` | `https://models.opencode.ai/api.json` | models.dev-style metadata feed filling limits, modalities and thinking levels the upstream omits. Upstream values win; failures are ignored. |
+| `allow-http` | `bool` | `false` | Permits `http://` in `base-url` for local testing. |
 
-## Multiple upstream channels
+Per channel (`upstreams[]`):
 
-One plugin instance can serve several upstreams. The top-level `base-url` /
-`api-keys` / `models` stay the **primary** channel; every `upstreams` entry is an
-**additional** channel with its own host and credentials:
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `name` | `string` | *(Required)* | Unique channel name: credential label, model-ID prefix and log tag. |
+| `base-url` | `string` | `https://opencode.ai/inference/go` | Service root. Every path below appends verbatim, so a versioned base plus versioned paths yields `/v1/v1/...`. Must be HTTPS (or HTTP with `allow-http`) without query, fragment or userinfo. |
+| `api-keys` | `[]object` | *(Required)* | Keys for this channel (`- value: "..."`, optional `name:`). `$ENV_VAR` expands; duplicates and empty values are rejected. |
+| `catalog-path` | `string` | `/v1/models` | Model list endpoint, relative to `base-url`. |
+| `quota-path` | `string` | `/v1/usage` | Usage/quota endpoint, relative to `base-url`. |
+| `protocol-endpoints` | `map` | `/v1/{chat/completions,responses,messages}`, `/google/v1beta/models` | Path of each protocol, appended to `base-url`. |
+| `messages-auth` | `string` | `x-api-key` | Header the Messages route authenticates with: `x-api-key` (OpenCode Go) or `bearer` (an Anthropic-wire gateway that rejects `x-api-key`). |
+| `model-prefix.enabled` | `bool` | `true` | When `false`, publishes bare model IDs. Only one channel may do this. |
+| `model-prefix.value` | `string` | channel `name` | Prefix string when enabled. Must be unique across channels. |
+| `models` | `map` | `{}` | Per-model policy: `protocols` (ordered, first = default route), `reasoning-shape` (`summary` \| `content`), `endpoints` (per-protocol path override). |
+| `fallback-routes` | `[]object` | *(built-in table)* | Family prefixes for models `models` does not list (`{prefix, protocol}`, first match wins). `[]` disables guessing. |
+
+## Several upstream channels
+
+Each entry is a full channel description — nothing is shared except the global
+settings above:
 
 ```yaml
-base-url: "https://opencode.ai/inference/go"
-protocol-endpoints:
-  chat-completions: "/openai/v1/chat/completions"
-  responses: "/openai/v1/responses"
-  messages: "/anthropic/v1/messages"
-api-keys:
-  - value: "${OPENCODE_GO_API_KEY}"
-
 upstreams:
-  - name: od                       # required, unique, used as the model prefix
-    base-url: "https://second-vendor.example/v1"
-    catalog-path: "/models"        # default /v1/models
-    quota-path: "/usage"           # default /v1/usage
-    protocol-endpoints:            # defaults to the shipped paths; override per vendor
-      chat-completions: "/chat/completions"
-      responses: "/responses"
-      messages: "/messages"
-    models:                        # only needed for IDs no family prefix matches
-      some-model-id:
-        protocols: ["chat-completions"]
+  - name: "opencode-go"
+    api-keys:
+      - value: "${OPENCODE_GO_API_KEY}"
+  - name: "od"
+    base-url: "https://second-vendor.example"
+    catalog-path: "/v1/models"
+    protocol-endpoints:
+      chat-completions: "/v1/chat/completions"
+      responses: "/v1/responses"
+      messages: "/v1/messages"
+    messages-auth: "bearer"
     api-keys:
       - value: "${SECOND_VENDOR_KEY}"
-        name: Second
 ```
 
 Rules that matter:
 
-- **A channel owns its credentials.** An entry never inherits the primary's
-  keys or base URL, so a mistyped entry cannot take over the primary
-  credentials. Base URL and keys are required per entry; `name` must be unique.
-- **Model IDs are namespaced.** Extra channels always publish `<name>/<model>`
-  (`model-prefix.enabled: false` is ignored there, only `value` is honoured),
-  because the host keeps one executor per model ID: an unprefixed duplicate
-  would silently drop that channel's models and mix credentials. The primary
-  keeps its own `model-prefix` setting, so a deployment that publishes bare
-  names (`model-prefix.enabled: false`) keeps doing exactly that.
-- **Routing follows the configured key→channel mapping**, not a stored field:
-  moving a key between channels or renaming a channel re-routes on the next
-  reload without touching credential files.
-- **Each credential reports its own quota.** The quota call uses the credential's
-  channel `base-url` + `quota-path`, so every row in the panel/keeper shows that
-  channel's allowance. A channel whose upstream has no usage endpoint (or a
-  different response shape) logs a failure for its own row only; the others are
-  unaffected.
-- **Model list per channel.** Each channel keeps its own catalog snapshot
-  (primary: `catalog.json`, extra: `catalog-<name>.json`), refresh cadence and
-  protocol policy. A model that neither `models` nor `fallback-routes` can route
-  is still excluded from the catalog — list it under that channel's `models`
-  when its ID matches no family prefix.
+- **A channel owns everything it uses.** No key, base URL, path, model policy or
+  auth scheme is inherited, so a mistyped entry can never aim one vendor's key
+  at another vendor's host.
+- **Model IDs are namespaced.** Every channel publishes `<prefix>/<model>`, with
+  the prefix defaulting to its `name`. Exactly one channel may set
+  `model-prefix.enabled: false` (bare IDs) — two would collide, because the host
+  keeps one executor per model ID, and that is rejected at load.
+- **Routing follows the configured key→channel mapping**, not a field stored in
+  the credential file: moving a key between channels re-routes on the next
+  reload without touching auth files.
+- **Each credential reports its own quota**, resolved through its channel's
+  `base-url` + `quota-path`. A channel whose upstream has no usage endpoint
+  fails only its own row.
+- **Each channel keeps its own catalog snapshot** (`catalog.json` for the first,
+  `catalog-<name>.json` for the rest) and refresh state. A model that neither
+  `models` nor `fallback-routes` can route stays excluded — list it under that
+  channel's `models` when its ID matches no family prefix.
 
 ## Testing
 

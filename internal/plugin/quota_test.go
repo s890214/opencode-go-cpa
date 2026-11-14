@@ -83,7 +83,7 @@ func TestQuotaErrorsRedacted(t *testing.T) {
 	}
 }
 func TestAccountLabels(t *testing.T) {
-	cfg, err := config.Load([]byte("api-keys:\n  - value: one\n    name: Personal\n  - value: two\n"))
+	cfg, err := config.Load([]byte("upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: one\n        name: Personal\n      - value: two\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

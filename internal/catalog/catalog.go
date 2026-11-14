@@ -289,16 +289,11 @@ func (m *Manager) Refresh(ctx context.Context, apiKey string) error {
 	return nil
 }
 
-// fail applies the stale policy and returns the classified error.
+// fail returns the classified error and keeps the last good snapshot in
+// place. Wiping it would turn a transient upstream failure into "no models at
+// all", which is strictly worse than serving what the vendor advertised a
+// minute ago.
 func (m *Manager) fail(category string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.cfg.Catalog.StaleWhileUnavailable {
-		// Clear the index too — Lookup must stop resolving IDs whose
-		// records are gone (FR-002). Raw entries go with them: a cleared
-		// snapshot has nothing to seed.
-		m.raw, m.models, m.index, m.unsup, m.warns = nil, nil, nil, nil, nil
-	}
 	return fmt.Errorf("catalog refresh failed: %s", category)
 }
 
@@ -336,16 +331,6 @@ modelLoop:
 		}
 		if !ok {
 			unsup = append(unsup, UnsupportedModel{UpstreamID: e.ID, Reason: "no route determined"})
-			continue
-		}
-		if !m.protocolEnabled(route) {
-			// Flags apply at snapshot build; a stale snapshot kept per
-			// FR-002 reflects the flags it was built with until the next
-			// successful refresh.
-			unsup = append(unsup, UnsupportedModel{
-				UpstreamID: e.ID,
-				Reason:     fmt.Sprintf("protocol %s disabled by config", route),
-			})
 			continue
 		}
 		if endpoint == "" {
@@ -460,8 +445,6 @@ modelLoop:
 	m.persistLocked(entries)
 }
 
-// protocolEnabled reports whether the resolved route's protocol flag is on
-// (spec 04 §4); flags default to true.
 // endpointPathsFor resolves the path of every supported protocol: the
 // configured endpoint when the operator pinned one, the protocol default
 // otherwise.
@@ -503,20 +486,6 @@ func (m *Manager) reasoningShapeFor(upstreamID string) config.ReasoningShape {
 		return shape
 	}
 	return config.ShapeSummary
-}
-
-func (m *Manager) protocolEnabled(r Route) bool {
-	switch r {
-	case RouteChatCompletions:
-		return m.cfg.Protocols.ChatCompletions
-	case RouteMessages:
-		return m.cfg.Protocols.Messages
-	case RouteResponses:
-		return m.cfg.Protocols.Responses
-	case RouteGemini:
-		return m.cfg.Protocols.Gemini
-	}
-	return true
 }
 
 // modelConfig resolves a model's policy, tolerating case differences against

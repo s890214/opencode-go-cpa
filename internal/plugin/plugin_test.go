@@ -28,9 +28,11 @@ import (
 const (
 	testKey         = "sk-test-secret-1"
 	testCatalogJSON = `{"data":[{"id":"glm-5.3"}]}`
-	testValidYAML   = "api-keys:\n  - value: " + testKey + "\n"
+	testValidYAML   = "upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: " + testKey + "\n"
 	dummyKey        = "sk-test"
-	dummyKeyYAML    = "api-keys:\n  - value: " + dummyKey + "\n"
+	// testValidYAMLNoPrefix is the same single channel with bare model IDs.
+	testValidYAMLNoPrefix = "upstreams:\n  - name: opencode-go\n    model-prefix:\n      enabled: false\n    api-keys:\n      - value: " + testKey + "\n"
+	dummyKeyYAML          = "upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: " + dummyKey + "\n"
 )
 
 type capturedCall struct {
@@ -437,7 +439,7 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 		t.Fatalf("schema_version = %d, want %d", reg.SchemaVersion, pluginabi.SchemaVersion)
 	}
 	if reg.Metadata.Name != pluginName || reg.Metadata.Version != pluginVersion ||
-		len(reg.Metadata.ConfigFields) != 19 {
+		len(reg.Metadata.ConfigFields) != 8 {
 		t.Fatalf("metadata wrong: %+v", reg.Metadata)
 	}
 	if !reg.Capabilities.ModelProvider || !reg.Capabilities.AuthProvider {
@@ -508,23 +510,12 @@ func TestRegistrationConfigFields(t *testing.T) {
 		typ  pluginapi.ConfigFieldType
 	}{
 		{"upstreams", pluginapi.ConfigFieldTypeArray},
-		{"api-keys", pluginapi.ConfigFieldTypeArray},
-		{"base-url", pluginapi.ConfigFieldTypeString},
-		{"catalog-path", pluginapi.ConfigFieldTypeString},
-		{"quota-path", pluginapi.ConfigFieldTypeString},
-		{"model-prefix", pluginapi.ConfigFieldTypeObject},
-		{"catalog", pluginapi.ConfigFieldTypeObject},
-		{"protocols", pluginapi.ConfigFieldTypeObject},
-		{"route-overrides", pluginapi.ConfigFieldTypeObject},
-		{"models", pluginapi.ConfigFieldTypeObject},
-		{"protocol-endpoints", pluginapi.ConfigFieldTypeObject},
-		{"messages-auth", pluginapi.ConfigFieldTypeString},
-		{"fallback-routes", pluginapi.ConfigFieldTypeArray},
 		{"request-timeout", pluginapi.ConfigFieldTypeString},
 		{"stream-idle-timeout", pluginapi.ConfigFieldTypeString},
+		{"max-response-bytes", pluginapi.ConfigFieldTypeInteger},
+		{"catalog-refresh-interval", pluginapi.ConfigFieldTypeString},
 		{"catalog-cache-path", pluginapi.ConfigFieldTypeString},
 		{"metadata-url", pluginapi.ConfigFieldTypeString},
-		{"max-response-bytes", pluginapi.ConfigFieldTypeInteger},
 		{"allow-http", pluginapi.ConfigFieldTypeBoolean},
 	}
 
@@ -548,14 +539,14 @@ func TestRegistrationConfigFields(t *testing.T) {
 
 func TestLifecycleMaterializesDeterministicAuthRecords(t *testing.T) {
 	first, second, third := "sk-materialize-a", "sk-materialize-b", "sk-materialize-c"
-	yamlText := "api-keys:\n  - value: " + first + "\n  - value: " + second + "\n"
+	yamlText := "upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: " + first + "\n      - value: " + second + "\n"
 	f := &fakeCaller{responder: catalogResponder(true, testCatalogJSON)}
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(yamlText)); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody("api-keys:\n  - value: "+second+"\n  - value: "+first+"\n")); err != nil {
+	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody("upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: "+second+"\n      - value: "+first+"\n")); err != nil {
 		t.Fatalf("reconfigure: %v", err)
 	}
 	calls := f.callsOf(pluginabi.MethodHostAuthSave)
@@ -590,7 +581,7 @@ func TestLifecycleMaterializesDeterministicAuthRecords(t *testing.T) {
 	if len(seen) != 2 {
 		t.Fatalf("materialized keys = %v", seen)
 	}
-	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody("api-keys:\n  - value: "+first+"\n")); err != nil {
+	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody("upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: "+first+"\n")); err != nil {
 		t.Fatalf("removed-key reconfigure: %v", err)
 	}
 	// No delete callback exists in the pinned ABI: the old record is stale and
@@ -598,7 +589,7 @@ func TestLifecycleMaterializesDeterministicAuthRecords(t *testing.T) {
 	if len(f.callsOf(pluginabi.MethodHostAuthSave)) != 2 {
 		t.Fatalf("removed-key reconfigure changed save count = %d, want 2", len(f.callsOf(pluginabi.MethodHostAuthSave)))
 	}
-	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody("api-keys:\n  - value: "+first+"\n  - value: "+third+"\n")); err != nil {
+	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody("upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: "+first+"\n      - value: "+third+"\n")); err != nil {
 		t.Fatalf("new-key reconfigure: %v", err)
 	}
 	calls = f.callsOf(pluginabi.MethodHostAuthSave)
@@ -742,7 +733,7 @@ func TestReconfigureSwapsPrefixIDs(t *testing.T) {
 	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	noPrefix := testValidYAML + "model-prefix:\n  enabled: false\n"
+	noPrefix := testValidYAMLNoPrefix
 	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody(noPrefix)); err != nil {
 		t.Fatalf("reconfigure: %v", err)
 	}
@@ -1009,7 +1000,7 @@ func TestConcurrentHandleCalls(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			body := lifecycleRequestBody(testValidYAML)
 			if i%2 == 1 {
-				body = lifecycleRequestBody(testValidYAML + "model-prefix:\n  enabled: false\n")
+				body = lifecycleRequestBody(testValidYAMLNoPrefix)
 			}
 			if _, err := m.HandleCall("plugin.reconfigure", body); err != nil {
 				t.Errorf("reconfigure: %v", err)
@@ -1214,7 +1205,7 @@ func TestReconfigureFailedRefreshSeedsCarryoverThenFetchesNewURL(t *testing.T) {
 	}
 	assertStaticModel(t, m, "opencode-go/glm-5.3")
 
-	newBaseYAML := testValidYAML + "base-url: https://mirror.test/api\n"
+	newBaseYAML := "upstreams:\n  - name: opencode-go\n    base-url: https://mirror.test/api\n    api-keys:\n      - value: " + testKey + "\n"
 	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody(newBaseYAML)); err != nil {
 		t.Fatalf("reconfigure: %v", err)
 	}
@@ -1228,71 +1219,6 @@ func TestReconfigureFailedRefreshSeedsCarryoverThenFetchesNewURL(t *testing.T) {
 	// directly over the served state instead of waiting for the loop.
 	manualTick(t, m)
 	assertStaticModel(t, m, "opencode-go/minimax-m3")
-}
-
-// TestReconfigureFailedRefreshHonorsStalePolicy pins the seed-gate fix: on a
-// failed-refresh reconfigure the seed consults the NEW config's
-// stale-while-unavailable — fail-closed serves nothing immediately (matching
-// Manager.fail's ticker behavior), stale-enabled keeps carrying over.
-func TestReconfigureFailedRefreshHonorsStalePolicy(t *testing.T) {
-	catalogV1 := `{"data":[{"id":"glm-5.3"}]}`
-	catalogV2 := `{"data":[{"id":"minimax-m3"}]}`
-	for _, tc := range []struct {
-		name          string
-		policyYAML    string
-		wantImmediate bool // model visible right after the failed reconfigure
-	}{
-		{name: "stale enabled keeps carryover", policyYAML: "", wantImmediate: true},
-		{name: "fail closed empties immediately", policyYAML: "catalog:\n  stale-while-unavailable: false\n", wantImmediate: false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var fetches atomic.Int64
-			f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
-				if method != pluginabi.MethodHostHTTPDo {
-					return hostOK(map[string]any{}), nil
-				}
-				var wire map[string]any
-				_ = json.Unmarshal(payload, &wire)
-				if url, _ := wire["url"].(string); !strings.HasSuffix(url, "/models") {
-					return hostOK(map[string]any{}), nil
-				}
-				switch fetches.Add(1) {
-				case 1:
-					return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(catalogV1)}), nil
-				case 2:
-					return hostErr("upstream_down", "simulated refresh failure"), nil
-				default:
-					return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(catalogV2)}), nil
-				}
-			}}
-			m := NewManager(NewHostBridge(f.call))
-			t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
-
-			if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
-				t.Fatalf("register: %v", err)
-			}
-			assertStaticModel(t, m, "opencode-go/glm-5.3")
-
-			if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody(testValidYAML+tc.policyYAML)); err != nil {
-				t.Fatalf("reconfigure: %v", err)
-			}
-
-			var static pluginapi.ModelResponse
-			decodeResult(t, mustHandle(t, m, "model.static", nil), &static)
-			got := len(static.Models)
-			if tc.wantImmediate && (got != 1 || static.Models[0].ID != "opencode-go/glm-5.3") {
-				t.Fatalf("carryover models = %+v, want glm-5.3", static.Models)
-			}
-			if !tc.wantImmediate && got != 0 {
-				t.Fatalf("fail-closed served %d models immediately, want 0", got)
-			}
-
-			// Both policies recover via the next successful tick against the
-			// NEW manager/config.
-			manualTick(t, m)
-			assertStaticModel(t, m, "opencode-go/minimax-m3")
-		})
-	}
 }
 
 func staticModelID(t *testing.T, m *Manager) string {
@@ -1325,9 +1251,10 @@ func mustHandle(t *testing.T, m *Manager, method string, req []byte) []byte {
 // the configured key→channel mapping: routing a key to the wrong base URL is
 // worse than reporting an unknown channel.
 func TestAuthUpstreamNameFollowsConfigKeys(t *testing.T) {
-	cfg, err := config.Load([]byte(`api-keys:
-  - value: primary-key
-upstreams:
+	cfg, err := config.Load([]byte(`upstreams:
+  - name: opencode-go
+    api-keys:
+      - value: primary-key
   - name: od
     base-url: https://second.test/v1
     api-keys:

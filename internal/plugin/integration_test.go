@@ -387,7 +387,7 @@ func (st *mockOpenCode) chatRequest(t *testing.T) (path, auth string, body map[s
 
 func integrationYAML(baseURL string) string {
 	// base-url is the service root; protocol-endpoints carry the dated paths.
-	return fmt.Sprintf("base-url: %s\nallow-http: true\napi-keys:\n  - value: sk-test-1\n", baseURL)
+	return fmt.Sprintf("allow-http: true\nupstreams:\n  - name: opencode-go\n    base-url: %s\n    api-keys:\n      - value: sk-test-1\n", baseURL)
 }
 
 // newIntegrationManager registers a manager whose outbound calls flow
@@ -868,9 +868,10 @@ func TestResponsesStreamingRoundTrip(t *testing.T) {
 // ---- AC §A/§B/§C/§D remaining boxes ------------------------------------
 
 func TestPrefixDisabledE2E(t *testing.T) {
-	m, _, _, yamlText := newIntegrationManager(t)
+	m, _, _, _ := newIntegrationManager(t)
+	// Bare model IDs come from the channel's own model-prefix block.
 	resp := mustHandle(t, m, "plugin.reconfigure",
-		lifecycleRequestBody(yamlText+"model-prefix:\n  enabled: false\n"))
+		lifecycleRequestBody("upstreams:\n  - name: opencode-go\n    model-prefix:\n      enabled: false\n    base-url: https://opencode.test\n    api-keys:\n      - value: sk-test-1\n"))
 	if env := decodeEnv(t, resp); !env.OK {
 		t.Fatalf("reconfigure: %s", resp)
 	}
@@ -1053,7 +1054,7 @@ func TestResponsesUnsupportedFeatureDescriptive(t *testing.T) {
 // ---- AC §E upstream errors + §F security, end to end -------------------
 
 func integrationTwoKeyYAML(baseURL string) string {
-	return fmt.Sprintf("base-url: %s\nallow-http: true\napi-keys:\n  - value: sk-test-1\n  - value: sk-test-2\n", baseURL)
+	return fmt.Sprintf("allow-http: true\nupstreams:\n  - name: opencode-go\n    base-url: %s\n    api-keys:\n      - value: sk-test-1\n      - value: sk-test-2\n", baseURL)
 }
 
 func newTwoKeyManager(t *testing.T) (*Manager, *fakeCaller, *mockOpenCode) {
@@ -1152,7 +1153,7 @@ func TestHTTPSDefaultEnforced(t *testing.T) {
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
 
-	httpYAML := fmt.Sprintf("base-url: %s\napi-keys:\n  - value: sk-test-1\n", st.srv.URL)
+	httpYAML := fmt.Sprintf("upstreams:\n  - name: opencode-go\n    base-url: %s\n    api-keys:\n      - value: sk-test-1\n", st.srv.URL)
 	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(httpYAML))
 	if err != nil {
 		t.Fatalf("register: %v", err)
@@ -1190,7 +1191,7 @@ func TestHTTPSDefaultEnforced(t *testing.T) {
 func TestRouteOverrideEndpointReachesUpstream(t *testing.T) {
 	m, _, st, yamlText := newIntegrationManager(t)
 	st.setCatalogBody(`{"data":[{"id":"totally-new-x"}]}`)
-	yamlText += "route-overrides:\n  totally-new-x:\n    protocol: messages\n    endpoint: /v1/messages-override\n"
+	yamlText += "    models:\n      totally-new-x:\n        protocols: [messages]\n        endpoints:\n          messages: /v1/messages-override\n"
 	resp := mustHandle(t, m, "plugin.reconfigure", lifecycleRequestBody(yamlText))
 	if env := decodeEnv(t, resp); !env.OK {
 		t.Fatalf("reconfigure: %s", resp)

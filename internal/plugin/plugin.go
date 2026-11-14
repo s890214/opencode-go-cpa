@@ -26,7 +26,7 @@ const ProviderID = "opencode-go"
 // pluginName / pluginVersion are reported in registration metadata.
 const (
 	pluginName    = "opencode-go-cpa"
-	pluginVersion = "0.7.0"
+	pluginVersion = "0.8.0"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
@@ -249,68 +249,10 @@ type registrationResult struct {
 func pluginConfigFields() []pluginapi.ConfigField {
 	return []pluginapi.ConfigField{
 		{
-			Name:        "upstreams",
-			Type:        pluginapi.ConfigFieldTypeArray,
-			Description: "Additional upstream channels declared next to the primary (top-level) one (`- name: od`, `base-url: ...`, `api-keys: [...]`). Each entry needs its own name, base URL and keys; its models are published as `<name>/<model>` so they never collide with the primary's. `protocol-endpoints` defaults to the shipped paths and must be overridden for a vendor with different routes. Without this block the plugin serves the single top-level channel.",
-		},
-		{
-			Name:        "api-keys",
-			Type:        pluginapi.ConfigFieldTypeArray,
-			Description: "List of OpenCode Go API keys (`- value: ...`, optional `name: Personal`). Supports ${ENV_VAR} expansion.",
-		},
-		{
-			Name:        "base-url",
-			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Upstream service root (default: https://opencode.ai/inference/go). Protocol paths are appended verbatim.",
-		},
-		{
-			Name:        "catalog-path",
-			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Path of the catalog endpoint relative to base-url (default: /v1/models).",
-		},
-		{
-			Name:        "quota-path",
-			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Path of the usage endpoint relative to base-url (default: /v1/usage).",
-		},
-		{
-			Name:        "model-prefix",
-			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Client-facing model ID prefix configuration (`enabled: bool`, `value: string`).",
-		},
-		{
-			Name:        "catalog",
-			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Catalog discovery settings (`refresh-interval: string`, `stale-while-unavailable: bool`).",
-		},
-		{
-			Name:        "protocols",
-			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Protocol enable/disable switches (`chat-completions: bool`, `messages: bool`, `responses: bool`, `gemini: bool`). Gemini only affects models routed to the /google/v1beta endpoint.",
-		},
-		{
-			Name:        "route-overrides",
-			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Legacy: explicit route overrides per model (`<model-id>: {protocol: string, endpoint: string}`). Merged into `models`; prefer `models` for new entries.",
-		},
-		{
-			Name:        "models",
-			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Per-model policy (`<model-id>: {protocols: [...], reasoning-shape: summary|content, endpoints: {protocol: path}}`). `protocols` is ordered and the first entry is the default route; a client whose protocol is listed is passed through unmodified. This block replaces protocol-preference and route-overrides.",
-		},
-		{
-			Name:        "protocol-endpoints",
-			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Path of each protocol (`chat-completions: /v1/chat/completions`, ...). Change these when the upstream moves an endpoint; the plugin hardcodes nothing.",
-		},
-		{
-			Name:        "messages-auth",
-			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Header the Messages route authenticates with (`x-api-key` for OpenCode Go, `bearer` for an Anthropic-wire gateway that only accepts bearer tokens). Per channel; extra channels default to `x-api-key`."},
-		{
-			Name:        "fallback-routes",
-			Type:        pluginapi.ConfigFieldTypeArray,
-			Description: "Family prefixes for models the `models` block does not list (`[{prefix: gpt, protocol: responses}, ...]`), first match wins. Empty means no guessing.",
+			Name: "upstreams",
+			Type: pluginapi.ConfigFieldTypeArray,
+			Description: "Every upstream channel, including the first (`- name: opencode-go`, `base-url: ...`, `api-keys: [...]`, optional `catalog-path`, `quota-path`, `model-prefix`, `models`, `protocol-endpoints`, `fallback-routes`, `messages-auth`). " +
+				"A channel publishes its models as `<name>/<model>` unless `model-prefix.enabled: false`, which only one channel may do. Nothing is inherited between channels: each entry carries its own base URL and keys.",
 		},
 		{
 			Name:        "request-timeout",
@@ -323,19 +265,24 @@ func pluginConfigFields() []pluginapi.ConfigField {
 			Description: "Max silence between stream chunks before the stream is closed (default: 5m). Total duration is still bounded by request-timeout.",
 		},
 		{
+			Name:        "max-response-bytes",
+			Type:        pluginapi.ConfigFieldTypeInteger,
+			Description: "Max non-streaming response body size in bytes (default: 67108864).",
+		},
+		{
+			Name:        "catalog-refresh-interval",
+			Type:        pluginapi.ConfigFieldTypeString,
+			Description: "How often the model catalog is refreshed, per channel (default: 15m, minimum 1m).",
+		},
+		{
 			Name:        "catalog-cache-path",
 			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Absolute path of the last-good catalog snapshot (default: <user-cache>/opencode-go/catalog.json). Serves models when the upstream catalog is down at startup.",
+			Description: "Absolute path of the last-good catalog snapshot (default: <user-cache>/opencode-go/catalog.json). One file per channel; serves models when the upstream catalog is down at startup.",
 		},
 		{
 			Name:        "metadata-url",
 			Type:        pluginapi.ConfigFieldTypeString,
 			Description: "models.dev-style metadata feed used to fill limits, modalities and thinking levels the upstream omits (default: https://models.opencode.ai/api.json).",
-		},
-		{
-			Name:        "max-response-bytes",
-			Type:        pluginapi.ConfigFieldTypeInteger,
-			Description: "Max non-streaming response body size in bytes (default: 67108864).",
 		},
 		{
 			Name:        "allow-http",
@@ -438,16 +385,12 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	m.cfg = cfg
 	// FR-002 stale-while-unavailable: a failed refresh must neither wipe a
 	// non-empty previous snapshot nor keep the OLD manager, whose stored cfg
-	// would pin the old base-url/catalog-path/protocols/prefix so ticks
-	// fetched the old URL with the new config's keys forever (F5). The NEW
-	// manager is adopted unconditionally; when a previous snapshot exists
-	// AND the NEW config keeps stale-while-unavailable enabled, it is
-	// seeded into the new one, so serving is unchanged until the next
-	// successful tick refreshes against the NEW config. Under fail-closed
-	// (stale-while-unavailable:false) no seed happens — same as the ticker
-	// failure path — so a reconfigure during an outage serves nothing until
-	// a refresh succeeds, honoring the operator's policy on BOTH paths.
-	if refreshErr != nil && cfg.Catalog.StaleWhileUnavailable {
+	// would pin the old base-url/catalog-path/prefix so ticks fetched the old
+	// URL with the new config's keys forever (F5). The NEW manager is adopted
+	// unconditionally; when a channel's refresh failed and a previous
+	// snapshot exists, it is seeded into the new one, so serving is unchanged
+	// until the next successful tick refreshes against the NEW config.
+	if refreshErr != nil {
 		for i := range upstreams {
 			if refreshErrs[upstreams[i].name] == nil {
 				continue

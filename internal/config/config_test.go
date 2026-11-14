@@ -16,35 +16,36 @@ func requireErrContains(t *testing.T, err error, want string) {
 	}
 }
 
-// withKey satisfies the at-least-one-key rule (spec 04 §3) for fixtures
-// that target a later validation check.
-const withKey = "api-keys:\n  - value: sk-dummy\n"
+// withKey is a minimal valid config: one channel, one key, every other field
+// defaulted. It is the shape a first install pastes in.
+const withKey = "upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: sk-dummy\n"
 
 func TestLoadMinimalAppliesAllDefaults(t *testing.T) {
 	c, err := Load([]byte(withKey))
 	if err != nil {
 		t.Fatalf("Load(minimal) failed: %v", err)
 	}
-	if c.BaseURL != "https://opencode.ai/inference/go" {
-		t.Errorf("BaseURL = %q", c.BaseURL)
+	if len(c.Upstreams) != 1 {
+		t.Fatalf("Upstreams = %d, want 1", len(c.Upstreams))
 	}
-	if c.CatalogPath != "/v1/models" {
-		t.Errorf("CatalogPath = %q", c.CatalogPath)
+	u := c.Upstreams[0]
+	if u.Name != "opencode-go" || u.BaseURL != "https://opencode.ai/inference/go" {
+		t.Errorf("channel = %+v", u)
 	}
-	if !c.ModelPrefix.Enabled || c.ModelPrefix.Value != "opencode-go" {
-		t.Errorf("ModelPrefix = %+v", c.ModelPrefix)
+	if u.CatalogPath != "/v1/models" || u.QuotaPath != "/v1/usage" {
+		t.Errorf("paths = %q/%q", u.CatalogPath, u.QuotaPath)
 	}
-	if len(c.APIKeys) != 1 || c.APIKeys[0].Value != "sk-dummy" {
-		t.Errorf("APIKeys = %+v", c.APIKeys)
+	if !u.ModelPrefix.Enabled || u.ModelPrefix.Value != "opencode-go" {
+		t.Errorf("ModelPrefix = %+v", u.ModelPrefix)
+	}
+	if len(u.APIKeys) != 1 || u.APIKeys[0].Value != "sk-dummy" {
+		t.Errorf("APIKeys = %+v", u.APIKeys)
+	}
+	if u.MessagesAuth != MessagesAuthSchemeXAPIKey {
+		t.Errorf("MessagesAuth = %q", u.MessagesAuth)
 	}
 	if c.Catalog.RefreshInterval != 15*time.Minute {
 		t.Errorf("RefreshInterval = %v", c.Catalog.RefreshInterval)
-	}
-	if !c.Catalog.StaleWhileUnavailable {
-		t.Errorf("StaleWhileUnavailable = false")
-	}
-	if !c.Protocols.ChatCompletions || !c.Protocols.Messages || !c.Protocols.Responses {
-		t.Errorf("Protocols = %+v", c.Protocols)
 	}
 	if c.AllowHTTP {
 		t.Errorf("AllowHTTP = true")
@@ -55,6 +56,11 @@ func TestLoadMinimalAppliesAllDefaults(t *testing.T) {
 	if c.MaxResponseBytes != 67108864 {
 		t.Errorf("MaxResponseBytes = %d", c.MaxResponseBytes)
 	}
+	// The aggregate view mirrors the first channel so a reader that does not
+	// resolve a channel still sees the same values.
+	if c.BaseURL != u.BaseURL || c.ModelPrefix != u.ModelPrefix || len(c.APIKeys) != 1 {
+		t.Errorf("aggregate view = %q / %+v / %+v", c.BaseURL, c.ModelPrefix, c.APIKeys)
+	}
 }
 
 func TestLoadFullConfigHonorsEveryField(t *testing.T) {
@@ -62,71 +68,79 @@ func TestLoadFullConfigHonorsEveryField(t *testing.T) {
 	doc := `
 enabled: true
 future-key: 1
-base-url: http://localhost:9090/v1
-catalog-path: /models
-model-prefix:
-  enabled: true
-  value: myprefix
-api-keys:
-  - value: ${TEST_OG_KEY}
-catalog:
-  refresh-interval: 1h
-  stale-while-unavailable: false
-protocols:
-  chat-completions: false
-  messages: false
-  responses: false
-route-overrides:
-  gpt-5.6-luna:
-    protocol: responses
-    endpoint: /v1/responses
 allow-http: true
-request-timeout: 5m
+request-timeout: 4m
+stream-idle-timeout: 90s
 max-response-bytes: 1024
+catalog-refresh-interval: 1h
+metadata-url: https://metadata.test/api.json
+upstreams:
+  - name: myprefix
+    base-url: http://localhost:9090/v1
+    catalog-path: /models
+    quota-path: /usage
+    model-prefix:
+      enabled: true
+      value: myprefix
+    messages-auth: bearer
+    protocol-endpoints:
+      chat-completions: /openai/v1/chat/completions
+    fallback-routes:
+      - {prefix: glm, protocol: chat-completions}
+    models:
+      gpt-5.6-luna:
+        protocols: [responses, chat-completions]
+        reasoning-shape: content
+        endpoints:
+          responses: /v1/responses-override
+    api-keys:
+      - value: ${TEST_OG_KEY}
+        name: Personal
 `
 	c, err := Load([]byte(doc))
 	if err != nil {
 		t.Fatalf("Load(full) failed: %v", err)
 	}
-	if c.BaseURL != "http://localhost:9090/v1" {
-		t.Errorf("BaseURL = %q", c.BaseURL)
+	u := c.Upstreams[0]
+	if u.BaseURL != "http://localhost:9090/v1" || u.CatalogPath != "/models" || u.QuotaPath != "/usage" {
+		t.Errorf("channel paths = %+v", u)
 	}
-	if c.CatalogPath != "/models" {
-		t.Errorf("CatalogPath = %q", c.CatalogPath)
+	if !u.ModelPrefix.Enabled || u.ModelPrefix.Value != "myprefix" {
+		t.Errorf("ModelPrefix = %+v", u.ModelPrefix)
 	}
-	if !c.ModelPrefix.Enabled || c.ModelPrefix.Value != "myprefix" {
-		t.Errorf("ModelPrefix = %+v", c.ModelPrefix)
+	if u.MessagesAuth != MessagesAuthSchemeBearer {
+		t.Errorf("MessagesAuth = %q", u.MessagesAuth)
 	}
-	if len(c.APIKeys) != 1 || c.APIKeys[0].Value != "test-secret-value" {
-		t.Errorf("APIKeys = %+v", c.APIKeys)
+	if len(u.APIKeys) != 1 || u.APIKeys[0].Value != "test-secret-value" || u.APIKeys[0].Name != "Personal" {
+		t.Errorf("APIKeys = %+v", u.APIKeys)
+	}
+	if got := u.ProtocolEndpoints["chat-completions"]; got != "/openai/v1/chat/completions" {
+		t.Errorf("chat endpoint = %q", got)
+	}
+	if got := u.ProtocolEndpoints["responses"]; got != DefaultProtocolEndpoints["responses"] {
+		t.Errorf("responses endpoint = %q", got)
+	}
+	if len(u.FallbackRoutes) != 1 || u.FallbackRoutes[0].Prefix != "glm" {
+		t.Errorf("FallbackRoutes = %+v", u.FallbackRoutes)
+	}
+	mc, ok := u.Models["gpt-5.6-luna"]
+	if !ok || mc.DefaultProtocol() != "responses" || mc.EndpointFor("responses") != "/v1/responses-override" || mc.ReasoningShape != ShapeContent {
+		t.Errorf("Models = %+v", u.Models)
 	}
 	if c.Catalog.RefreshInterval != time.Hour {
 		t.Errorf("RefreshInterval = %v", c.Catalog.RefreshInterval)
 	}
-	if c.Catalog.StaleWhileUnavailable {
-		t.Errorf("StaleWhileUnavailable = true")
+	if !c.AllowHTTP || c.RequestTimeout != 4*time.Minute || c.StreamIdleTimeout != 90*time.Second {
+		t.Errorf("globals = %v/%v/%v", c.AllowHTTP, c.RequestTimeout, c.StreamIdleTimeout)
 	}
-	if c.Protocols.ChatCompletions || c.Protocols.Messages || c.Protocols.Responses {
-		t.Errorf("Protocols = %+v", c.Protocols)
-	}
-	mc, ok := c.Models["gpt-5.6-luna"]
-	if !ok || mc.DefaultProtocol() != "responses" || mc.EndpointFor("responses") != "/v1/responses" {
-		t.Errorf("Models = %+v", c.Models)
-	}
-	if !c.AllowHTTP {
-		t.Errorf("AllowHTTP = false")
-	}
-	if c.RequestTimeout != 5*time.Minute {
-		t.Errorf("RequestTimeout = %v", c.RequestTimeout)
-	}
-	if c.MaxResponseBytes != 1024 {
-		t.Errorf("MaxResponseBytes = %d", c.MaxResponseBytes)
+	if c.MaxResponseBytes != 1024 || c.MetadataURL != "https://metadata.test/api.json" {
+		t.Errorf("MaxResponseBytes/MetadataURL = %d/%q", c.MaxResponseBytes, c.MetadataURL)
 	}
 }
 
 func TestLoadEnvExpansion(t *testing.T) {
 	t.Setenv("TEST_OG_KEY", "expanded-secret")
-	c, err := Load([]byte("api-keys:\n  - value: ${TEST_OG_KEY}\n"))
+	c, err := Load([]byte("upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: ${TEST_OG_KEY}\n"))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -135,18 +149,24 @@ func TestLoadEnvExpansion(t *testing.T) {
 	}
 }
 
-func TestLoadIgnoresRemovedSchedulerFields(t *testing.T) {
-	doc := "routing:\n  strategy: round-robin\n  max-retries-per-request: 9\n  transient-retry-interval: 1s\n  fallback-cooldown: 1m\n" +
+// Unknown keys stay ignored so the host may pass newer fields, but the old
+// top-level channel schema is not silently accepted: without an `upstreams`
+// entry there is no channel, and that is an error rather than a config whose
+// keys went nowhere.
+func TestLoadIgnoresUnknownFieldsButRejectsOldTopLevelSchema(t *testing.T) {
+	doc := "routing:\n  strategy: round-robin\n  max-retries-per-request: 9\n" +
+		"future-key: 1\n" +
 		"api-keys:\n  - value: sk-dummy\n    priority: 7\n"
-	if _, err := Load([]byte(doc)); err != nil {
-		t.Fatalf("removed scheduler fields must remain unknown and ignored: %v", err)
+	_, err := Load([]byte(doc))
+	requireErrContains(t, err, "upstreams: at least one channel is required")
+
+	if _, err := Load([]byte("future-key: 1\n" + withKey)); err != nil {
+		t.Fatalf("unknown top-level key must be ignored: %v", err)
 	}
 }
 
-// The catalog lives under base-url like every protocol path, so an unset
-// catalog-path keeps the same default wherever base-url points.
 func TestLoadCatalogPathDefaultsRelativeToBase(t *testing.T) {
-	c, err := Load([]byte("base-url: https://upstream.example.com/api\n" + withKey))
+	c, err := Load([]byte("upstreams:\n  - name: c\n    base-url: https://upstream.example.com/api\n    api-keys:\n      - value: k\n"))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -155,10 +175,8 @@ func TestLoadCatalogPathDefaultsRelativeToBase(t *testing.T) {
 	}
 }
 
-// An explicit catalog-path ending in "/" is trimmed so the URL joined with
-// base-url never carries a trailing slash.
 func TestLoadExplicitCatalogPathTrimsTrailingSlash(t *testing.T) {
-	c, err := Load([]byte("catalog-path: /api/models///\n" + withKey))
+	c, err := Load([]byte("upstreams:\n  - name: c\n    catalog-path: /api/models///\n    api-keys:\n      - value: k\n"))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -167,10 +185,8 @@ func TestLoadExplicitCatalogPathTrimsTrailingSlash(t *testing.T) {
 	}
 }
 
-// An explicitly empty catalog-path falls back to the default, matching
-// quota-path's treatment of an empty override.
 func TestLoadEmptyCatalogPathFallsBackToDefault(t *testing.T) {
-	c, err := Load([]byte("catalog-path: \"\"\n" + withKey))
+	c, err := Load([]byte("upstreams:\n  - name: c\n    catalog-path: \"\"\n    api-keys:\n      - value: k\n"))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -180,11 +196,7 @@ func TestLoadEmptyCatalogPathFallsBackToDefault(t *testing.T) {
 }
 
 func TestPrefixDisabledSkipsValueValidation(t *testing.T) {
-	doc := `
-model-prefix:
-  enabled: false
-  value: "has space"
-` + withKey
+	doc := "upstreams:\n  - name: c\n    model-prefix:\n      enabled: false\n      value: \"has space\"\n    api-keys:\n      - value: k\n"
 	c, err := Load([]byte(doc))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
@@ -213,56 +225,64 @@ func TestLoadRejections(t *testing.T) {
 	}{
 		{"invalid yaml syntax", "[unclosed", "decode config"},
 		{"unknown anchor has no line info", "request-timeout: *nope\n", "decode config: invalid YAML structure"},
-		{"bare-scalar api key never leaks", "api-keys:\n  - sk-live-secret-123\n", "decode config: invalid YAML structure"},
-		{"keyless config rejected", "", "api-keys: at least one key is required"},
+		{"bare-scalar api key never leaks", "upstreams:\n  - name: c\n    api-keys:\n      - plain-scalar-key\n", "decode config: invalid YAML structure"},
+		{"no channel at all", "", "upstreams: at least one channel is required"},
+		{"channel without keys", "upstreams:\n  - name: c\n    base-url: https://a.test\n", "api-keys: at least one key is required"},
+		{"channel without name", "upstreams:\n  - base-url: https://a.test\n    api-keys:\n      - value: k\n", "name is required"},
 		{"request-timeout zero rejected", "request-timeout: 0s\n" + withKey, "request-timeout: must be positive"},
 		{
-			"duplicate route-override keys",
-			"route-overrides:\n" +
-				"  gpt-5.6-luna:\n    protocol: responses\n    endpoint: /v1/responses\n" +
-				"  gpt-5.6-luna:\n    protocol: messages\n    endpoint: /v1/messages\n",
+			"duplicate model keys",
+			"upstreams:\n  - name: c\n    api-keys:\n      - value: k\n    models:\n" +
+				"      gpt-5.6-luna:\n        protocols: [responses]\n" +
+				"      gpt-5.6-luna:\n        protocols: [messages]\n",
 			"decode config: invalid YAML structure near line",
 		},
 		{
 			"key expands to empty",
-			"api-keys:\n  - value: ${TEST_OG_DEFINITELY_UNSET_VAR}\n",
+			"upstreams:\n  - name: c\n    api-keys:\n      - value: ${TEST_OG_DEFINITELY_UNSET_VAR}\n",
 			"api-keys[0].value: expanded to empty",
 		},
 		{
 			"second key expands to empty",
-			"api-keys:\n  - value: literal-ok\n  - value: ${TEST_OG_DEFINITELY_UNSET_VAR}\n",
+			"upstreams:\n  - name: c\n    api-keys:\n      - value: literal-ok\n      - value: ${TEST_OG_DEFINITELY_UNSET_VAR}\n",
 			"api-keys[1].value: expanded to empty",
 		},
-		{"explicitly empty base-url", `base-url: ""`, "base-url: must not be empty"},
-		{"malformed base-url", `base-url: "::::"`, "base-url: invalid URL"},
-		{"scheme-less base-url", "base-url: opencode.ai/zen/go/v1", "base-url: invalid URL"},
-		{"catalog-path without leading slash", `catalog-path: "models"` + "\n" + withKey, "catalog-path: must start with /"},
-		{"catalog-path given as full URL", `catalog-path: "https://example.com/models"` + "\n" + withKey, "catalog-path: must start with /"},
-		{"http base-url without allow-http", "base-url: http://localhost:9090/v1", "base-url: http scheme requires allow-http"},
-		{"ftp base-url", "base-url: ftp://files.example.com/v1", `base-url: unsupported scheme "ftp"`},
-		{"ftp base-url with allow-http", "allow-http: true\nbase-url: ftp://files.example.com/v1", `base-url: unsupported scheme "ftp"`},
-		{"refresh-interval missing unit", "catalog:\n  refresh-interval: 5\n", "catalog.refresh-interval: invalid duration"},
-		{"refresh-interval negative", "catalog:\n  refresh-interval: -5m\n" + withKey, "catalog.refresh-interval: must be at least 1m"},
-		{"refresh-interval below floor", "catalog:\n  refresh-interval: 1ms\n" + withKey, "catalog.refresh-interval: must be at least 1m"},
-		{"request-timeout unparsable", "request-timeout: bogus\n", "request-timeout: invalid duration"},
-		{"request-timeout explicitly empty", `request-timeout: ""`, "request-timeout: invalid duration"},
-		{"request-timeout zero rejected", "request-timeout: 0s\n" + withKey, "request-timeout: must be positive"},
-		{"userinfo credentials never echoed", "base-url: https://user:sekret@/v1", "base-url: invalid URL https://"},
+		{"explicitly empty base-url", "upstreams:\n  - name: c\n    base-url: \"\"\n    api-keys:\n      - value: k\n", "base-url: must not be empty"},
+		{"malformed base-url", "upstreams:\n  - name: c\n    base-url: \"::::\"\n    api-keys:\n      - value: k\n", "base-url: invalid URL"},
+		{"scheme-less base-url", "upstreams:\n  - name: c\n    base-url: opencode.ai/zen/go/v1\n    api-keys:\n      - value: k\n", "base-url: invalid URL"},
+		{"catalog-path without leading slash", "upstreams:\n  - name: c\n    catalog-path: models\n    api-keys:\n      - value: k\n", "catalog-path: must start with /"},
+		{"catalog-path given as full URL", "upstreams:\n  - name: c\n    catalog-path: https://example.com/models\n    api-keys:\n      - value: k\n", "catalog-path: must start with /"},
+		{"http base-url without allow-http", "upstreams:\n  - name: c\n    base-url: http://localhost:9090/v1\n    api-keys:\n      - value: k\n", "base-url: http scheme requires allow-http"},
+		{"ftp base-url", "upstreams:\n  - name: c\n    base-url: ftp://files.example.com/v1\n    api-keys:\n      - value: k\n", `base-url: unsupported scheme "ftp"`},
+		{"ftp base-url with allow-http", "allow-http: true\nupstreams:\n  - name: c\n    base-url: ftp://files.example.com/v1\n    api-keys:\n      - value: k\n", `base-url: unsupported scheme "ftp"`},
+		{"refresh-interval missing unit", "catalog-refresh-interval: 5\n" + withKey, "catalog-refresh-interval: invalid duration"},
+		{"refresh-interval negative", "catalog-refresh-interval: -5m\n" + withKey, "catalog-refresh-interval: must be at least 1m"},
+		{"refresh-interval below floor", "catalog-refresh-interval: 1ms\n" + withKey, "catalog-refresh-interval: must be at least 1m"},
+		{"request-timeout unparsable", "request-timeout: bogus\n" + withKey, "request-timeout: invalid duration"},
+		{"request-timeout explicitly empty", "request-timeout: \"\"\n" + withKey, "request-timeout: invalid duration"},
+		{"userinfo credentials never echoed", "upstreams:\n  - name: c\n    base-url: https://user:sekret@/v1\n    api-keys:\n      - value: k\n", "base-url: invalid URL https://"},
 		{"max-response-bytes zero rejected", "max-response-bytes: 0\n" + withKey, "max-response-bytes: must be positive"},
 		{"max-response-bytes negative rejected", "max-response-bytes: -5\n" + withKey, "max-response-bytes: must be positive"},
 		{
-			"override unsupported protocol",
-			"route-overrides:\n  bad-model:\n    protocol: grpc\n    endpoint: /v1/x\n" + withKey,
+			"model with unsupported protocol",
+			"upstreams:\n  - name: c\n    api-keys:\n      - value: k\n    models:\n      bad-model:\n        protocols: [grpc]\n",
 			"models[bad-model].protocols: unsupported protocol",
 		},
 		{
-			"override endpoint without leading slash",
-			"route-overrides:\n  bad-model:\n    protocol: responses\n    endpoint: v1/x\n" + withKey,
+			"model endpoint without leading slash",
+			"upstreams:\n  - name: c\n    api-keys:\n      - value: k\n    models:\n      bad-model:\n        protocols: [responses]\n        endpoints:\n          responses: v1/x\n",
 			"models[bad-model].endpoints[responses]: must start with /",
 		},
-		{"prefix enabled empty value", "model-prefix:\n  enabled: true\n  value: \"\"\n" + withKey, "model-prefix.value: invalid provider-ID characters"},
-		{"prefix with space", "model-prefix:\n  value: has space\n" + withKey, "model-prefix.value: invalid provider-ID characters"},
-		{"prefix leading dash", "model-prefix:\n  value: -lead\n" + withKey, "model-prefix.value: invalid provider-ID characters"},
+		{"prefix enabled empty value", "upstreams:\n  - name: c\n    model-prefix:\n      enabled: true\n      value: \"\"\n    api-keys:\n      - value: k\n", "model-prefix.value: invalid provider-ID characters"},
+		{"prefix with space", "upstreams:\n  - name: c\n    model-prefix:\n      value: has space\n    api-keys:\n      - value: k\n", "model-prefix.value: invalid provider-ID characters"},
+		{"prefix leading dash", "upstreams:\n  - name: c\n    model-prefix:\n      value: -lead\n    api-keys:\n      - value: k\n", "model-prefix.value: invalid provider-ID characters"},
+		{"invalid channel name", "upstreams:\n  - name: \"bad name\"\n    api-keys:\n      - value: k\n", "invalid upstream name"},
+		{"messages-auth unknown scheme", "upstreams:\n  - name: c\n    messages-auth: basic\n    api-keys:\n      - value: k\n", "messages-auth: must be"},
+		{"duplicate channel name", "upstreams:\n  - name: c\n    api-keys:\n      - value: k1\n  - name: c\n    api-keys:\n      - value: k2\n", "already used by another channel"},
+		// Two channels publishing the same model IDs would make the host drop
+		// one channel's models, so it is rejected at load.
+		{"two bare-name channels", "upstreams:\n  - name: a\n    model-prefix:\n      enabled: false\n    api-keys:\n      - value: k1\n  - name: b\n    model-prefix:\n      enabled: false\n    api-keys:\n      - value: k2\n", "both publish bare model IDs"},
+		{"two channels sharing a prefix", "upstreams:\n  - name: a\n    model-prefix:\n      value: same\n    api-keys:\n      - value: k1\n  - name: b\n    model-prefix:\n      value: same\n    api-keys:\n      - value: k2\n", "share the model-prefix"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -284,9 +304,9 @@ func TestLoadErrorsNeverLeakDecodedValues(t *testing.T) {
 		yaml   string
 		secret string
 	}{
-		{"bare-scalar api key", "api-keys:\n  - sk-live-supersecret-42\n", "sk-live-supersecret-42"},
-		{"duplicate api key values", "api-keys:\n  - value: sk-live-dupsecret-7\n  - value: sk-live-dupsecret-7\n", "sk-live-dupsecret-7"},
-		{"userinfo credentials", "base-url: https://admin:p4ssw0rd@/v1\n", "p4ssw0rd"},
+		{"bare-scalar api key", "upstreams:\n  - name: c\n    api-keys:\n      - plain-scalar-key\n", "plain-scalar-key"},
+		{"duplicate api key values", "upstreams:\n  - name: c\n    api-keys:\n      - value: duplicate-key-value\n      - value: duplicate-key-value\n", "duplicate-key-value"},
+		{"userinfo credentials", "upstreams:\n  - name: c\n    base-url: https://admin:p4ssw0rd@/v1\n    api-keys:\n      - value: k\n", "p4ssw0rd"},
 	}
 	for _, tc := range cases {
 		_, err := Load([]byte(tc.yaml))
@@ -333,37 +353,24 @@ func TestValidateURLRejectsQueryFragmentUserinfo(t *testing.T) {
 	}
 }
 
-// An override without a path means "use the protocol default"; the merge folds
-// it into the model policy without pinning a path, so no error is raised.
-func TestEmptyOverrideEndpointUsesProtocolDefault(t *testing.T) {
-	c, err := Load([]byte(`route-overrides:
-  bad-model:
-    protocol: responses
-    endpoint: ""
-` + withKey))
-	if err != nil {
-		t.Fatalf("Load failed: %v", err)
-	}
-	mc, ok := c.Models["bad-model"]
-	if !ok || mc.DefaultProtocol() != "responses" {
-		t.Fatalf("Models = %+v", c.Models)
-	}
-	if got := mc.EndpointFor("responses"); got != "" {
-		t.Fatalf("endpoint = %q, want empty (protocol default)", got)
-	}
-}
+// --- several channels -------------------------------------------------------
 
-// --- extra upstream channels -------------------------------------------------
-
-func TestExtraUpstreamIsAdditionalChannel(t *testing.T) {
-	c, err := Load([]byte(`base-url: https://primary.test/go
-protocol-endpoints:
-  chat-completions: /openai/v1/chat/completions
-api-keys:
-  - value: primary-key
-upstreams:
+func TestTwoChannelsKeepTheirOwnSettings(t *testing.T) {
+	c, err := Load([]byte(`upstreams:
+  - name: opencode-go
+    base-url: https://primary.test/go
+    protocol-endpoints:
+      chat-completions: /openai/v1/chat/completions
+    models:
+      glm-5.3:
+        protocols: [chat-completions]
+    fallback-routes:
+      - {prefix: glm, protocol: chat-completions}
+    api-keys:
+      - value: primary-key
   - name: od
     base-url: https://second.test/v1
+    messages-auth: bearer
     api-keys:
       - value: second-key
 `))
@@ -374,100 +381,60 @@ upstreams:
 		t.Fatalf("Upstreams = %d, want 2", len(c.Upstreams))
 	}
 	primary, extra := c.Upstreams[0], c.Upstreams[1]
-	if primary.Name != DefaultUpstreamName || primary.BaseURL != "https://primary.test/go" {
-		t.Errorf("primary = %+v", primary)
+	if primary.BaseURL != "https://primary.test/go" || extra.BaseURL != "https://second.test/v1" {
+		t.Errorf("base URLs = %q / %q", primary.BaseURL, extra.BaseURL)
 	}
 	if len(primary.APIKeys) != 1 || primary.APIKeys[0].Value != "primary-key" {
-		t.Errorf("primary keys hijacked: %+v", primary.APIKeys)
-	}
-	if extra.Name != "od" || extra.BaseURL != "https://second.test/v1" {
-		t.Errorf("extra = %+v", extra)
+		t.Errorf("primary keys = %+v", primary.APIKeys)
 	}
 	if len(extra.APIKeys) != 1 || extra.APIKeys[0].Value != "second-key" {
 		t.Errorf("extra keys = %+v", extra.APIKeys)
 	}
-	// An extra channel must publish its models under its own prefix, never
-	// the primary's IDs.
-	if !extra.ModelPrefix.Enabled || extra.ModelPrefix.Value != "od" {
-		t.Errorf("extra prefix = %+v", extra.ModelPrefix)
-	}
-	// The primary's explicit endpoint override is not copied: a different
-	// vendor must not inherit another host's paths.
+	// Nothing channel-scoped is inherited: the second vendor must not post to
+	// another host's paths, inherit its model policy or its auth scheme.
 	if got := extra.ProtocolEndpoints["chat-completions"]; got != DefaultProtocolEndpoints["chat-completions"] {
 		t.Errorf("extra chat endpoint = %q, want default %q", got, DefaultProtocolEndpoints["chat-completions"])
 	}
-	// Global settings stay shared.
+	if primary.ProtocolEndpoints["chat-completions"] != "/openai/v1/chat/completions" {
+		t.Errorf("primary chat endpoint = %q", primary.ProtocolEndpoints["chat-completions"])
+	}
+	if len(extra.Models) != 0 {
+		t.Errorf("extra inherited models: %+v", extra.Models)
+	}
+	if extra.FallbackRoutes != nil {
+		t.Errorf("extra inherited fallback routes: %+v", extra.FallbackRoutes)
+	}
 	if extra.CatalogPath != DefaultCatalogPath || extra.QuotaPath != DefaultQuotaPath {
 		t.Errorf("extra paths = %q/%q", extra.CatalogPath, extra.QuotaPath)
 	}
-	// One catalogue snapshot per channel, the primary keeps the legacy path.
+	// Each channel publishes under its own prefix by default.
+	if primary.ModelPrefix.Value != "opencode-go" || extra.ModelPrefix.Value != "od" {
+		t.Errorf("prefixes = %+v / %+v", primary.ModelPrefix, extra.ModelPrefix)
+	}
+	// One catalogue snapshot per channel.
 	if c.ForUpstream(extra).CatalogCachePath == c.ForUpstream(primary).CatalogCachePath {
 		t.Error("channels share one catalog cache file")
 	}
+	if _, ok := c.UpstreamByName("od"); !ok {
+		t.Error("UpstreamByName(od) missing")
+	}
 }
 
-func TestExtraUpstreamRequiresName(t *testing.T) {
-	_, err := Load([]byte(withKey + `upstreams:
-  - base-url: https://second.test/v1
-    api-keys:
-      - value: second-key
-`))
-	requireErrContains(t, err, "name is required")
-}
-
-func TestExtraUpstreamRequiresBaseURL(t *testing.T) {
-	_, err := Load([]byte(withKey + `upstreams:
-  - name: od
-    api-keys:
-      - value: second-key
-`))
-	requireErrContains(t, err, "upstreams[od]")
-}
-
-func TestExtraUpstreamRequiresKeys(t *testing.T) {
-	_, err := Load([]byte(withKey + `upstreams:
-  - name: od
-    base-url: https://second.test/v1
-`))
-	requireErrContains(t, err, "upstreams[od]")
-}
-
-func TestExtraUpstreamRejectsDuplicateName(t *testing.T) {
-	_, err := Load([]byte(withKey + `upstreams:
-  - name: od
-    base-url: https://second.test/v1
-    api-keys:
-      - value: second-key
-  - name: od
-    base-url: https://third.test/v1
-    api-keys:
-      - value: third-key
-`))
-	requireErrContains(t, err, "already used")
-}
-
-func TestExtraUpstreamCannotDropItsPrefix(t *testing.T) {
-	c, err := Load([]byte(withKey + `upstreams:
-  - name: od
-    base-url: https://second.test/v1
-    base-url-typo-guard: ignored
-    model-prefix:
-      enabled: false
-    api-keys:
-      - value: second-key
-`))
+func TestChannelNeedsNoBaseURLForTheDefaultVendor(t *testing.T) {
+	c, err := Load([]byte("upstreams:\n  - name: solo\n    api-keys:\n      - value: k\n"))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if got := c.Upstreams[1].ModelPrefix; !got.Enabled || got.Value != "od" {
-		t.Fatalf("prefix = %+v, want enabled od", got)
+	if c.Upstreams[0].BaseURL != DefaultBaseURL {
+		t.Errorf("BaseURL = %q, want %q", c.Upstreams[0].BaseURL, DefaultBaseURL)
 	}
 }
 
-func TestUpstreamByNameAndKeyEntries(t *testing.T) {
-	c, err := Load([]byte(`api-keys:
-  - value: primary-key
-upstreams:
+func TestKeyEntriesFollowChannelOrder(t *testing.T) {
+	c, err := Load([]byte(`upstreams:
+  - name: opencode-go
+    api-keys:
+      - value: primary-key
   - name: od
     base-url: https://second.test/v1
     api-keys:
@@ -481,49 +448,35 @@ upstreams:
 	if len(entries) != 3 {
 		t.Fatalf("KeyEntries = %d, want 3", len(entries))
 	}
-	if entries[0].Upstream != DefaultUpstreamName || entries[1].Upstream != "od" || entries[2].Upstream != "od" {
+	if entries[0].Upstream != "opencode-go" || entries[1].Upstream != "od" || entries[2].Upstream != "od" {
 		t.Fatalf("KeyEntries order/owner = %+v", entries)
-	}
-	if _, ok := c.UpstreamByName("od"); !ok {
-		t.Error("UpstreamByName(od) missing")
 	}
 	if _, ok := c.UpstreamByName("nope"); ok {
 		t.Error("UpstreamByName(nope) resolved")
 	}
 }
 
-func TestMessagesAuthScheme(t *testing.T) {
-	c, err := Load([]byte(withKey))
-	if err != nil {
-		t.Fatalf("Load failed: %v", err)
-	}
-	if c.MessagesAuth != MessagesAuthSchemeXAPIKey {
-		t.Errorf("default messages-auth = %q", c.MessagesAuth)
-	}
-
-	c, err = Load([]byte("messages-auth: bearer\n" + withKey + `upstreams:
+func TestMessagesAuthIsPerChannel(t *testing.T) {
+	c, err := Load([]byte(`upstreams:
+  - name: opencode-go
+    api-keys:
+      - value: primary-key
   - name: od
     base-url: https://second.test/v1
+    messages-auth: bearer
     api-keys:
       - value: second-key
 `))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if c.Upstreams[0].MessagesAuth != MessagesAuthSchemeBearer {
-		t.Errorf("primary messages-auth = %q", c.Upstreams[0].MessagesAuth)
+	if c.Upstreams[0].MessagesAuth != MessagesAuthSchemeXAPIKey {
+		t.Errorf("first channel messages-auth = %q", c.Upstreams[0].MessagesAuth)
 	}
-	// The scheme is per channel: an extra channel defaults to x-api-key and
-	// must not inherit the primary's bearer.
-	if c.Upstreams[1].MessagesAuth != MessagesAuthSchemeXAPIKey {
-		t.Errorf("extra messages-auth = %q", c.Upstreams[1].MessagesAuth)
+	if c.Upstreams[1].MessagesAuth != MessagesAuthSchemeBearer {
+		t.Errorf("second channel messages-auth = %q", c.Upstreams[1].MessagesAuth)
 	}
-	if got := c.ForUpstream(c.Upstreams[1]).MessagesAuth; got != MessagesAuthSchemeXAPIKey {
+	if got := c.ForUpstream(c.Upstreams[0]).MessagesAuth; got != MessagesAuthSchemeXAPIKey {
 		t.Errorf("view messages-auth = %q", got)
 	}
-}
-
-func TestMessagesAuthRejectsUnknownScheme(t *testing.T) {
-	_, err := Load([]byte("messages-auth: basic\n" + withKey))
-	requireErrContains(t, err, "messages-auth")
 }

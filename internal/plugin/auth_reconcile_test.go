@@ -63,7 +63,7 @@ func TestReconcileKeepsReadableFileNameAndRemovesUnknownKey(t *testing.T) {
 		ID: authRecordID(key), Name: authFileName("OpenCode Go") + ".json", Type: ProviderID, Provider: ProviderID, Path: readable,
 	}}}
 	m := NewManager(NewHostBridge(rec.responder()))
-	cfg, err := config.Load([]byte("api-keys:\n  - value: \"" + key + "\"\n"))
+	cfg, err := config.Load([]byte("upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: \"" + key + "\"\n"))
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestReconcileRenamesHashedFileNameToReadable(t *testing.T) {
 		ID: authRecordID("hashed-key-value"), Name: filepath.Base(hashed), Type: ProviderID, Provider: ProviderID, Path: hashed,
 	}}}
 	m := NewManager(NewHostBridge(rec.responder()))
-	cfg, err := config.Load([]byte("api-keys:\n  - value: hashed-key-value\n"))
+	cfg, err := config.Load([]byte("upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: hashed-key-value\n"))
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestReconcileLeavesCustomFileNamesAlone(t *testing.T) {
 		ID: "custom", Name: "My-Laptop-Key.json", Type: ProviderID, Provider: ProviderID, Path: custom,
 	}}}
 	m := NewManager(NewHostBridge(rec.responder()))
-	cfg, err := config.Load([]byte("api-keys:\n  - value: \"sk-other\"\n"))
+	cfg, err := config.Load([]byte("upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: \"sk-other\"\n"))
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestReconcileReenablesConfiguredRecord(t *testing.T) {
 		ID: id, Name: fileBase + ".json", Type: ProviderID, Provider: ProviderID, Path: path, Disabled: true,
 	}}}
 	m := NewManager(NewHostBridge(rec.responder()))
-	cfg, err := config.Load([]byte("api-keys:\n  - value: \"" + key + "\"\n"))
+	cfg, err := config.Load([]byte("upstreams:\n  - name: opencode-go\n    api-keys:\n      - value: \"" + key + "\"\n"))
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}

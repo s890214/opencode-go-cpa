@@ -1,3 +1,40 @@
+## v0.8.0 — one schema for every upstream
+
+**Breaking.** The plugin now has a single way to describe an upstream: the
+`upstreams` list. Each entry carries its own `base-url`, `api-keys`,
+`catalog-path`, `quota-path`, `protocol-endpoints`, `models`, `fallback-routes`,
+`model-prefix` and `messages-auth`, and the first entry is the default channel.
+Nothing is inherited between channels, so there is no second place where a key
+or a base URL can live.
+
+Moved into `upstreams[]` (top-level keys are gone):
+`base-url`, `api-keys`, `catalog-path`, `quota-path`, `protocol-endpoints`,
+`models`, `fallback-routes`, `model-prefix`, `messages-auth`, `catalog`.
+
+Removed, because they duplicated another setting or only ever had one sane
+value:
+
+- `route-overrides` and `protocol-preference` — `models[].protocols` /
+  `models[].endpoints` say the same thing in one place.
+- `protocols.*` switches — a model is routable exactly when `models` or
+  `fallback-routes` gives it a route; a second global gate could only contradict
+  that.
+- `catalog.stale-while-unavailable` — the last good snapshot is always kept: a
+  failed refresh must never turn into an empty model list.
+- `catalog` (nested) — replaced by the flat `catalog-refresh-interval`.
+
+Also new:
+
+- `base-url` may be omitted for a channel that talks to the default vendor, so a
+  single-channel install stays three lines.
+- Load-time validation rejects two channels that would publish the same model
+  IDs (both bare, or a shared prefix), which the host would otherwise resolve by
+  silently dropping one.
+
+An old config now fails to load with
+`upstreams: at least one channel is required` rather than serving an empty model
+list.
+
 ## v0.7.0 — several upstream channels in one plugin
 
 ### Features

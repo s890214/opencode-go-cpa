@@ -20,11 +20,13 @@ import (
 const (
 	cooledRefreshKey  = "sk-refresh-cooled-key"
 	goodRefreshKey    = "sk-refresh-good-key"
-	refreshTwoKeyYAML = "api-keys:\n" +
-		"  - value: " + cooledRefreshKey + "\n" +
-		"  - value: " + goodRefreshKey + "\n" +
-		"base-url: https://catalog.test\n" +
-		"catalog-path: /models\n"
+	refreshTwoKeyYAML = "upstreams:\n" +
+		"  - name: opencode-go\n" +
+		"    base-url: https://catalog.test\n" +
+		"    catalog-path: /models\n" +
+		"    api-keys:\n" +
+		"      - value: " + cooledRefreshKey + "\n" +
+		"      - value: " + goodRefreshKey + "\n"
 )
 
 // authRecorder answers host.http.do, records every Authorization header, and
@@ -123,8 +125,7 @@ func TestRefreshRotatesKeys(t *testing.T) {
 // field quoted (%q), so no raw newline can forge log lines (CWE-117).
 func TestRefreshUnsupportedLogQuotesNewlineIDs(t *testing.T) {
 	const evilID = "evil\n2027-01-01 ERROR forged host.log line"
-	cfg, err := config.Load([]byte("api-keys:\n  - value: sk-refresh-evil-key\n" +
-		"base-url: https://catalog.test\ncatalog-path: /models\n"))
+	cfg, err := config.Load([]byte("upstreams:\n  - name: opencode-go\n    base-url: https://catalog.test\n    catalog-path: /models\n    api-keys:\n      - value: sk-refresh-evil-key\n"))
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}

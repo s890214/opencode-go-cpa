@@ -39,40 +39,7 @@ type APIKey struct {
 }
 
 type Catalog struct {
-	RefreshInterval       time.Duration
-	StaleWhileUnavailable bool
-}
-
-type Protocols struct {
-	ChatCompletions bool
-	Messages        bool
-	Responses       bool
-	// Gemini gates the Google generateContent upstream route. It is an
-	// upstream protocol only: inbound Gemini-native clients are not
-	// registered, so this never changes what CPA may send us.
-	Gemini bool
-}
-
-// Enabled reports whether one protocol switch is on. Pass-through honours
-// the same switches the catalog build does, so a disabled protocol cannot
-// sneak back in through protocol-preference.
-func (p Protocols) Enabled(protocol string) bool {
-	switch protocol {
-	case "chat-completions":
-		return p.ChatCompletions
-	case "messages":
-		return p.Messages
-	case "responses":
-		return p.Responses
-	case "gemini":
-		return p.Gemini
-	}
-	return false
-}
-
-type RouteOverride struct {
-	Protocol string `yaml:"protocol"`
-	Endpoint string `yaml:"endpoint"`
+	RefreshInterval time.Duration
 }
 
 // ReasoningShape selects the wire form used when a Responses request has to
@@ -143,9 +110,7 @@ type Config struct {
 	ModelPrefix ModelPrefix
 	APIKeys     []APIKey
 	Catalog     Catalog
-	Protocols   Protocols
-	// Models carries the per-model policy merged from the `models` block and
-	// the legacy `protocol-preference` / `route-overrides` tables.
+	// Models carries the per-model policy from the channel's `models` block.
 	Models map[string]ModelConfig
 	// ProtocolEndpoints overrides each protocol's default path.
 	ProtocolEndpoints map[string]string
@@ -196,7 +161,6 @@ type Upstream struct {
 	APIKeys           []APIKey
 	Models            map[string]ModelConfig
 	ProtocolEndpoints map[string]string
-	Protocols         Protocols
 	FallbackRoutes    []FallbackRoute
 	// MessagesAuth selects the header the Messages route authenticates with.
 	// OpenCode Go expects x-api-key; an Anthropic-wire gateway that only
@@ -227,7 +191,6 @@ func (c Config) PrimaryUpstream() Upstream {
 			APIKeys:           c.APIKeys,
 			Models:            c.Models,
 			ProtocolEndpoints: c.ProtocolEndpoints,
-			Protocols:         c.Protocols,
 			FallbackRoutes:    c.FallbackRoutes,
 			MessagesAuth:      normalizeMessagesAuth(nil),
 		}
@@ -295,7 +258,6 @@ func (c Config) ForUpstream(u Upstream) Config {
 	out.ModelPrefix = u.ModelPrefix
 	out.Models = u.Models
 	out.ProtocolEndpoints = u.ProtocolEndpoints
-	out.Protocols = u.Protocols
 	out.FallbackRoutes = u.FallbackRoutes
 	out.MessagesAuth = u.MessagesAuth
 	out.Upstreams = nil
@@ -318,60 +280,35 @@ func upstreamCachePath(base, name, primary string) string {
 	return stem + "-" + name + ext
 }
 
-// rawConfig mirrors the YAML shape; pointer fields distinguish "unset"
-// (apply default) from explicitly-set values including "" (validate as-is).
+// rawConfig mirrors the YAML shape: global settings plus the channel list.
+// Every channel — including the first — is declared in `upstreams`, so there
+// is exactly one place where a base URL or a key can live. Pointer fields
+// distinguish "unset" (apply default) from explicitly-set values.
 // Unknown fields are ignored (host may pass extra keys).
 type rawConfig struct {
-	BaseURL            *string                   `yaml:"base-url"`
-	CatalogPath        *string                   `yaml:"catalog-path"`
-	ModelPrefix        rawPrefix                 `yaml:"model-prefix"`
-	APIKeys            []rawKey                  `yaml:"api-keys"`
-	Catalog            rawCatalog                `yaml:"catalog"`
-	Protocols          rawProtocols              `yaml:"protocols"`
-	Models             map[string]rawModelConfig `yaml:"models"`
-	ProtocolEndpoints  map[string]string         `yaml:"protocol-endpoints"`
-	QuotaPath          *string                   `yaml:"quota-path"`
-	FallbackRoutes     []FallbackRoute           `yaml:"fallback-routes"`
-	RouteOverrides     map[string]RouteOverride  `yaml:"route-overrides"`
-	ProtocolPreference map[string][]string       `yaml:"protocol-preference"`
-	MessagesAuth       *string                   `yaml:"messages-auth"`
-	AllowHTTP          bool                      `yaml:"allow-http"`
-	RequestTimeout     *string                   `yaml:"request-timeout"`
-	StreamIdleTimeout  *string                   `yaml:"stream-idle-timeout"`
-	MaxResponseBytes   *int64                    `yaml:"max-response-bytes"`
-	CatalogCachePath   *string                   `yaml:"catalog-cache-path"`
-	MetadataURL        *string                   `yaml:"metadata-url"`
-	// Upstreams declares additional channels. When present, the top-level
-	// base-url/api-keys describe the FIRST channel and become its defaults.
-	Upstreams []rawUpstream `yaml:"upstreams"`
+	AllowHTTP              bool          `yaml:"allow-http"`
+	RequestTimeout         *string       `yaml:"request-timeout"`
+	StreamIdleTimeout      *string       `yaml:"stream-idle-timeout"`
+	MaxResponseBytes       *int64        `yaml:"max-response-bytes"`
+	CatalogCachePath       *string       `yaml:"catalog-cache-path"`
+	CatalogRefreshInterval *string       `yaml:"catalog-refresh-interval"`
+	MetadataURL            *string       `yaml:"metadata-url"`
+	Upstreams              []rawUpstream `yaml:"upstreams"`
 }
 
-// rawUpstream mirrors one `upstreams[]` entry. Unset fields inherit the
-// top-level values (which keeps the legacy single-channel config working).
+// rawUpstream mirrors one `upstreams[]` entry: everything that differs per
+// vendor lives here, and nothing is inherited from another channel.
 type rawUpstream struct {
-	Name               *string                   `yaml:"name"`
-	BaseURL            *string                   `yaml:"base-url"`
-	CatalogPath        *string                   `yaml:"catalog-path"`
-	QuotaPath          *string                   `yaml:"quota-path"`
-	ModelPrefix        rawPrefix                 `yaml:"model-prefix"`
-	APIKeys            []rawKey                  `yaml:"api-keys"`
-	Protocols          rawProtocols              `yaml:"protocols"`
-	Models             map[string]rawModelConfig `yaml:"models"`
-	ProtocolEndpoints  map[string]string         `yaml:"protocol-endpoints"`
-	FallbackRoutes     []FallbackRoute           `yaml:"fallback-routes"`
-	RouteOverrides     map[string]RouteOverride  `yaml:"route-overrides"`
-	ProtocolPreference map[string][]string       `yaml:"protocol-preference"`
-	MessagesAuth       *string                   `yaml:"messages-auth"`
-}
-
-// asRawConfig lets an upstream entry reuse mergeModels (which folds `models`
-// plus the two legacy tables).
-func (u rawUpstream) asRawConfig() rawConfig {
-	return rawConfig{
-		Models:             u.Models,
-		RouteOverrides:     u.RouteOverrides,
-		ProtocolPreference: u.ProtocolPreference,
-	}
+	Name              *string                   `yaml:"name"`
+	BaseURL           *string                   `yaml:"base-url"`
+	CatalogPath       *string                   `yaml:"catalog-path"`
+	QuotaPath         *string                   `yaml:"quota-path"`
+	ModelPrefix       rawPrefix                 `yaml:"model-prefix"`
+	APIKeys           []rawKey                  `yaml:"api-keys"`
+	Models            map[string]rawModelConfig `yaml:"models"`
+	ProtocolEndpoints map[string]string         `yaml:"protocol-endpoints"`
+	FallbackRoutes    []FallbackRoute           `yaml:"fallback-routes"`
+	MessagesAuth      *string                   `yaml:"messages-auth"`
 }
 
 // rawModelConfig mirrors one entry of the `models` block.
@@ -394,18 +331,6 @@ type rawKey struct {
 	Value string `yaml:"value"`
 }
 
-type rawCatalog struct {
-	RefreshInterval       *string `yaml:"refresh-interval"`
-	StaleWhileUnavailable *bool   `yaml:"stale-while-unavailable"`
-}
-
-type rawProtocols struct {
-	ChatCompletions *bool `yaml:"chat-completions"`
-	Messages        *bool `yaml:"messages"`
-	Responses       *bool `yaml:"responses"`
-	Gemini          *bool `yaml:"gemini"`
-}
-
 var (
 	validProtocols = map[string]bool{"chat-completions": true, "messages": true, "responses": true, "gemini": true}
 )
@@ -422,11 +347,7 @@ func Load(yamlBytes []byte) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("decode config: invalid YAML structure")
 	}
-	keys := make([]APIKey, len(raw.APIKeys))
-	for i, k := range raw.APIKeys {
-		keys[i] = APIKey{Value: os.ExpandEnv(k.Value), Name: strings.TrimSpace(k.Name)}
-	}
-	refreshInterval, err := parseDuration("catalog.refresh-interval", raw.Catalog.RefreshInterval, DefaultRefreshInterval)
+	refreshInterval, err := parseDuration("catalog-refresh-interval", raw.CatalogRefreshInterval, DefaultRefreshInterval)
 	if err != nil {
 		return Config{}, err
 	}
@@ -457,40 +378,12 @@ func Load(yamlBytes []byte) (Config, error) {
 	if raw.MetadataURL != nil {
 		metadataURL = strings.TrimSpace(*raw.MetadataURL)
 	}
-	// Fold the `models` block and the legacy tables into one policy map.
-	models := mergeModels(raw)
-	protocols := Protocols{
-		ChatCompletions: orDefault(raw.Protocols.ChatCompletions, true),
-		Messages:        orDefault(raw.Protocols.Messages, true),
-		Responses:       orDefault(raw.Protocols.Responses, true),
-		Gemini:          orDefault(raw.Protocols.Gemini, true),
-	}
-	prefix := ModelPrefix{
-		Enabled: orDefault(raw.ModelPrefix.Enabled, true),
-		Value:   orDefault(raw.ModelPrefix.Value, DefaultModelPrefix),
-	}
-	primary := Upstream{
-		Name:              DefaultUpstreamName,
-		BaseURL:           orDefault(raw.BaseURL, DefaultBaseURL),
-		CatalogPath:       catalogPath(raw.CatalogPath),
-		QuotaPath:         quotaPath(raw.QuotaPath),
-		ModelPrefix:       prefix,
-		APIKeys:           keys,
-		Models:            models,
-		ProtocolEndpoints: protocolEndpoints(raw.ProtocolEndpoints),
-		Protocols:         protocols,
-		FallbackRoutes:    fallbackRoutes(raw.FallbackRoutes),
-		MessagesAuth:      normalizeMessagesAuth(raw.MessagesAuth),
-	}
-	upstreams, err := buildUpstreams(raw, primary)
+	upstreams, err := buildUpstreams(raw.Upstreams)
 	if err != nil {
 		return Config{}, err
 	}
 	c := Config{
-		Catalog: Catalog{
-			RefreshInterval:       refreshInterval,
-			StaleWhileUnavailable: orDefault(raw.Catalog.StaleWhileUnavailable, true),
-		},
+		Catalog:           Catalog{RefreshInterval: refreshInterval},
 		AllowHTTP:         raw.AllowHTTP,
 		RequestTimeout:    requestTimeout,
 		StreamIdleTimeout: streamIdleTimeout,
@@ -499,49 +392,50 @@ func Load(yamlBytes []byte) (Config, error) {
 		MetadataURL:       metadataURL,
 		Upstreams:         upstreams,
 	}
-	// Legacy fields mirror the primary channel so existing readers keep
-	// seeing the same values they saw before multiple upstreams existed.
-	first := upstreams[0]
-	c.BaseURL = first.BaseURL
-	c.ModelPrefix = first.ModelPrefix
-	c.APIKeys = first.APIKeys
-	c.Protocols = first.Protocols
-	c.Models = first.Models
-	c.ProtocolEndpoints = first.ProtocolEndpoints
-	c.MessagesAuth = first.MessagesAuth
-	c.CatalogPath = first.CatalogPath
-	c.QuotaPath = first.QuotaPath
-	c.FallbackRoutes = first.FallbackRoutes
+	// The channel-scoped fields mirror the first channel so readers that do
+	// not resolve a channel still see a coherent config.
+	if len(upstreams) > 0 {
+		first := upstreams[0]
+		c.BaseURL = first.BaseURL
+		c.ModelPrefix = first.ModelPrefix
+		c.APIKeys = first.APIKeys
+		c.Models = first.Models
+		c.ProtocolEndpoints = first.ProtocolEndpoints
+		c.MessagesAuth = first.MessagesAuth
+		c.CatalogPath = first.CatalogPath
+		c.QuotaPath = first.QuotaPath
+		c.FallbackRoutes = first.FallbackRoutes
+	}
 	if err := c.validate(); err != nil {
 		return Config{}, err
 	}
 	return c, nil
 }
 
-// buildUpstreams expands the `upstreams` block. The primary channel always
-// comes from the top-level fields; every `upstreams` entry is an ADDITIONAL
-// channel and must declare its own name, base URL and keys. An entry never
-// inherits the primary's keys or base URL — a mistyped entry must not be able
-// to take over the primary credentials. Protocol policy (switch map, fallback
-// routes) and global settings stay shared unless the entry overrides them.
-func buildUpstreams(raw rawConfig, primary Upstream) ([]Upstream, error) {
-	out := make([]Upstream, 0, 1+len(raw.Upstreams))
-	out = append(out, primary)
-	seen := map[string]struct{}{primary.Name: {}}
-	for i, ru := range raw.Upstreams {
+// buildUpstreams turns the `upstreams` list into channels. Every entry is a
+// complete description of one vendor — nothing is inherited from another
+// channel — so a typo can never aim one vendor's key at another vendor's base
+// URL, and there is no "primary is special" second schema to keep in sync.
+func buildUpstreams(raw []rawUpstream) ([]Upstream, error) {
+	out := make([]Upstream, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for i, ru := range raw {
 		name := ""
 		if ru.Name != nil {
 			name = strings.TrimSpace(*ru.Name)
 		}
 		if name == "" {
-			return nil, fmt.Errorf("upstreams[%d].name: name is required for extra upstreams", i)
+			return nil, fmt.Errorf("upstreams[%d].name: name is required", i)
 		}
 		if _, dup := seen[name]; dup {
 			return nil, fmt.Errorf("upstreams[%d].name: %q is already used by another channel", i, name)
 		}
 		seen[name] = struct{}{}
 
-		baseURL := ""
+		// An absent base-url means the default vendor (an install that only
+		// pastes a key stays a three-line config); an explicitly empty one is
+		// a mistake and reaches validation as "".
+		baseURL := DefaultBaseURL
 		if ru.BaseURL != nil {
 			baseURL = strings.TrimSpace(*ru.BaseURL)
 		}
@@ -549,64 +443,31 @@ func buildUpstreams(raw rawConfig, primary Upstream) ([]Upstream, error) {
 		for _, entry := range ru.APIKeys {
 			keys = append(keys, APIKey{Value: os.ExpandEnv(entry.Value), Name: strings.TrimSpace(entry.Name)})
 		}
-		// Endpoints start from the shipped defaults: a second channel of the
-		// same family needs no endpoint block, a different vendor overrides
-		// every path it disagrees with.
-		u := Upstream{
+		out = append(out, Upstream{
 			Name:              name,
 			BaseURL:           baseURL,
 			CatalogPath:       catalogPath(ru.CatalogPath),
 			QuotaPath:         quotaPath(ru.QuotaPath),
-			ModelPrefix:       ModelPrefix{Enabled: true, Value: name},
+			ModelPrefix:       resolvePrefix(ru.ModelPrefix, name),
 			APIKeys:           keys,
-			Models:            nil,
-			ProtocolEndpoints: protocolEndpoints(nil),
-			Protocols:         mergeProtocols(ru.Protocols, primary.Protocols),
-			FallbackRoutes:    primary.FallbackRoutes,
+			Models:            mergeModels(ru.Models),
+			ProtocolEndpoints: protocolEndpoints(ru.ProtocolEndpoints),
+			FallbackRoutes:    fallbackRoutes(ru.FallbackRoutes),
 			MessagesAuth:      normalizeMessagesAuth(ru.MessagesAuth),
-		}
-		// An extra channel cannot opt out of its prefix: two channels must
-		// never publish the same model ID, because the host keeps one
-		// executor per model and would drop this channel's models while
-		// mixing credentials. `model-prefix.enabled: false` is ignored here
-		// and only `value` is honoured.
-		if ru.ModelPrefix.Value != nil && strings.TrimSpace(*ru.ModelPrefix.Value) != "" {
-			u.ModelPrefix.Value = strings.TrimSpace(*ru.ModelPrefix.Value)
-		}
-		if len(ru.ProtocolEndpoints) > 0 {
-			merged := protocolEndpoints(nil)
-			for k, v := range protocolEndpoints(ru.ProtocolEndpoints) {
-				merged[k] = v
-			}
-			u.ProtocolEndpoints = merged
-		}
-		if len(ru.Models) > 0 || len(ru.RouteOverrides) > 0 || len(ru.ProtocolPreference) > 0 {
-			u.Models = mergeModels(ru.asRawConfig())
-		}
-		if ru.FallbackRoutes != nil {
-			u.FallbackRoutes = fallbackRoutes(ru.FallbackRoutes)
-		}
-		out = append(out, u)
+		})
 	}
 	return out, nil
 }
 
-// mergeProtocols overlays explicitly-set protocol switches on the inherited
-// defaults.
-func mergeProtocols(raw rawProtocols, base Protocols) Protocols {
-	if raw.ChatCompletions != nil {
-		base.ChatCompletions = *raw.ChatCompletions
+// resolvePrefix defaults a channel's prefix to its own name. Two channels that
+// both published bare names would collide on the same model ID, and the host
+// keeps one executor per ID.
+func resolvePrefix(raw rawPrefix, name string) ModelPrefix {
+	prefix := ModelPrefix{Enabled: orDefault(raw.Enabled, true), Value: name}
+	if raw.Value != nil {
+		prefix.Value = strings.TrimSpace(*raw.Value)
 	}
-	if raw.Messages != nil {
-		base.Messages = *raw.Messages
-	}
-	if raw.Responses != nil {
-		base.Responses = *raw.Responses
-	}
-	if raw.Gemini != nil {
-		base.Gemini = *raw.Gemini
-	}
-	return base
+	return prefix
 }
 
 // DefaultCatalogPath is where the model catalog sits under base-url. It is
@@ -678,19 +539,10 @@ func fallbackRoutes(raw []FallbackRoute) []FallbackRoute {
 	return out
 }
 
-// mergeModels folds the `models` block and the two legacy tables into one
-// policy map. Precedence per field: `models` wins, then `route-overrides`
-// (whose protocol also becomes the default route), then
-// `protocol-preference` (which only lists capabilities).
-//
-// The legacy shape forced operators to maintain the same model twice, with a
-// single endpoint slot shared by every protocol it speaks — which is what made
-// a model like qwen3.7-max look inconsistent. Merging here keeps existing
-// configs working while the new block stays the single source of truth.
-func mergeModels(raw rawConfig) map[string]ModelConfig {
-	models := make(map[string]ModelConfig, len(raw.Models))
-
-	for id, entry := range raw.Models {
+// mergeModels turns the `models` block into one policy map per model ID.
+func mergeModels(raw map[string]rawModelConfig) map[string]ModelConfig {
+	models := make(map[string]ModelConfig, len(raw))
+	for id, entry := range raw {
 		key := strings.TrimSpace(id)
 		mc := ModelConfig{}
 		seen := make(map[string]struct{}, len(entry.Protocols))
@@ -728,58 +580,7 @@ func mergeModels(raw rawConfig) map[string]ModelConfig {
 		}
 		models[key] = mc
 	}
-
-	for id, protocols := range raw.ProtocolPreference {
-		key := strings.TrimSpace(id)
-		mc := models[key]
-		if len(mc.Protocols) == 0 {
-			seen := make(map[string]struct{}, len(protocols))
-			for _, p := range protocols {
-				v := normalizeProtocol(p)
-				if v == "" {
-					continue
-				}
-				if _, dup := seen[v]; dup {
-					continue
-				}
-				seen[v] = struct{}{}
-				mc.Protocols = append(mc.Protocols, v)
-			}
-		}
-		models[key] = mc
-	}
-
-	for id, override := range raw.RouteOverrides {
-		key := strings.TrimSpace(id)
-		mc := models[key]
-		protocol := normalizeProtocol(override.Protocol)
-		if protocol != "" {
-			mc.Protocols = promoteProtocol(mc.Protocols, protocol)
-		}
-		if path := strings.TrimSpace(override.Endpoint); path != "" && protocol != "" {
-			if mc.Endpoints == nil {
-				mc.Endpoints = map[string]string{}
-			}
-			mc.Endpoints[protocol] = path
-		}
-		models[key] = mc
-	}
-
 	return models
-}
-
-// promoteProtocol moves proto to the front, adding it when absent. An
-// explicit route override states the default route, so it must win over
-// whatever order protocol-preference happened to use.
-func promoteProtocol(protocols []string, proto string) []string {
-	out := make([]string, 0, len(protocols)+1)
-	out = append(out, proto)
-	for _, p := range protocols {
-		if p != proto {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 func normalizeProtocol(p string) string {
@@ -796,7 +597,7 @@ func PublicID(c Config, upstreamID string) string {
 
 func (c Config) validate() error {
 	if c.Catalog.RefreshInterval < time.Minute {
-		return fmt.Errorf("catalog.refresh-interval: must be at least 1m")
+		return fmt.Errorf("catalog-refresh-interval: must be at least 1m")
 	}
 	if c.MaxResponseBytes <= 0 {
 		return fmt.Errorf("max-response-bytes: must be positive")
@@ -810,9 +611,12 @@ func (c Config) validate() error {
 		return fmt.Errorf("catalog-cache-path: must be absolute")
 	}
 	if len(c.Upstreams) == 0 {
-		return fmt.Errorf("upstreams: at least one upstream is required")
+		return fmt.Errorf("upstreams: at least one channel is required")
 	}
 	names := make(map[string]bool, len(c.Upstreams))
+	// Two channels must never publish the same model IDs: the host keys one
+	// executor per ID, so a collision silently drops one channel's models.
+	published := make(map[string]string, len(c.Upstreams))
 	for _, u := range c.Upstreams {
 		if !validUpstreamName(u.Name) {
 			return fmt.Errorf("upstreams: invalid upstream name %q (letters, digits, dot, dash and underscore only)", u.Name)
@@ -821,6 +625,17 @@ func (c Config) validate() error {
 			return fmt.Errorf("upstreams: duplicate upstream name %q", u.Name)
 		}
 		names[u.Name] = true
+		id := ""
+		if u.ModelPrefix.Enabled {
+			id = u.ModelPrefix.Value
+		}
+		if prev, dup := published[id]; dup {
+			if id == "" {
+				return fmt.Errorf("upstreams: %q and %q both publish bare model IDs; only one channel may set model-prefix.enabled: false", prev, u.Name)
+			}
+			return fmt.Errorf("upstreams: %q and %q share the model-prefix %q", prev, u.Name, id)
+		}
+		published[id] = u.Name
 		if err := c.ForUpstream(u).validateUpstream(); err != nil {
 			if len(c.Upstreams) == 1 {
 				// Keep the historical single-channel messages unchanged.

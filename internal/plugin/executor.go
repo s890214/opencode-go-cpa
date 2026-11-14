@@ -95,12 +95,11 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 		})
 	}
 	// Pass-through preference: when the upstream model speaks the client's
-	// protocol natively (protocol-preference), send it there instead of
-	// translating to the model's default route. This keeps Responses-only
-	// features (web_search, custom tools) intact for Responses clients.
-	// The protocol switches gate this path exactly like the catalog build,
-	// so a disabled protocol cannot re-enter through a preference entry.
-	if sourceRoute, ok := routeForSourceFormat(req.SourceFormat); ok && chanCfg.Protocols.Enabled(string(sourceRoute)) {
+	// protocol natively (declared in `models[].protocols`), send it there
+	// instead of translating to the model's default route. This keeps
+	// Responses-only features (web_search, custom tools) intact for
+	// Responses clients.
+	if sourceRoute, ok := routeForSourceFormat(req.SourceFormat); ok {
 		for _, supported := range rec.SupportedProtocols {
 			if supported == sourceRoute {
 				rec.Protocol = sourceRoute
