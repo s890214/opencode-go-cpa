@@ -108,9 +108,9 @@ func (m *Manager) reconcileAuthRecords(ctx context.Context, cfg config.Config) e
 		}
 		id := authRecordID(record.APIKey)
 		upstream, configured := expected[id]
-		if !configured && !isLegacyManagedName(base) {
-			// The api_key is not one of ours and the name is not one we ever
-			// wrote: a hand-written record, never touched.
+		if !configured && !managedAuthRecord(base, record) {
+			// The api_key is not one of ours and the file was not written by
+			// this plugin: a hand-written record, never touched.
 			debugTrace("auth reconcile skipped file=%s reason=unmanaged-key", filepath.Base(path))
 			continue
 		}
@@ -127,16 +127,21 @@ func (m *Manager) reconcileAuthRecords(ctx context.Context, cfg config.Config) e
 			recordUpstream = upstream
 		}
 		wantBase := authFileName(accountLabel(cfg, recordUpstream, record.APIKey, record.Label, 0))
+		renamed := false
 		if base != wantBase {
-			// Older versions wrote the 64-hex canonical id or a bare readable
-			// label; fold both into <Label>-<short digest> so the panel shows a
-			// human name. The JSON (and its id) is untouched, so the auth index
-			// and usage history stay stable.
-			if err := adoptManagedAuthFile(path, wantBase); err != nil {
+			// Older versions wrote the 64-hex canonical id; fold those into the
+			// readable label. The JSON (and its id) is not rewritten, so the
+			// host's auth index and usage history stay stable.
+			newPath, err := adoptManagedAuthFile(path, wantBase, expected)
+			if err != nil {
 				_ = m.bridge.Log("warn", fmt.Sprintf("opencode-go credential %s not adopted: %v", shortAuthID(id), err), nil)
 				continue
 			}
-			_ = m.bridge.Log("info", fmt.Sprintf("opencode-go credential %s renamed to %s.json", shortAuthID(id), wantBase), nil)
+			if filepath.Clean(newPath) != filepath.Clean(path) {
+				_ = m.bridge.Log("info", fmt.Sprintf("opencode-go credential %s renamed to %s", shortAuthID(id), filepath.Base(newPath)), nil)
+				path = newPath
+				renamed = true
+			}
 		}
 		if !entry.Disabled && !recordDisabled(data) {
 			continue
@@ -145,7 +150,11 @@ func (m *Manager) reconcileAuthRecords(ctx context.Context, cfg config.Config) e
 		if err != nil {
 			continue
 		}
-		if err := m.bridge.AuthSave(ctx, pluginapi.HostAuthSaveRequest{Name: entry.Name, JSON: enabled}); err != nil {
+		saveName := entry.Name
+		if renamed {
+			saveName = filepath.Base(path)
+		}
+		if err := m.bridge.AuthSave(ctx, pluginapi.HostAuthSaveRequest{Name: saveName, JSON: enabled}); err != nil {
 			_ = m.bridge.Log("warn", fmt.Sprintf("opencode-go credential %s not re-enabled: %v", shortAuthID(id), err), nil)
 			continue
 		}
@@ -179,19 +188,49 @@ func isLegacyManagedName(base string) bool {
 	return strings.HasPrefix(lower, "opencode-go")
 }
 
-// adoptManagedAuthFile renames a managed record to its current canonical base
-// name (<Label>-<short digest>). The JSON (and the auth id inside it) is not
-// rewritten, so the host's auth index is preserved. When the target already
-// exists the source is a duplicate and is removed.
-func adoptManagedAuthFile(path, base string) error {
+// managedAuthRecord reports whether this plugin can prove it wrote the record:
+// either the canonical id (derived from the api_key) or a legacy file name this
+// plugin used to generate. The readable label alone is not proof — a
+// hand-written file may reuse it — so ownership is never inferred from it.
+func managedAuthRecord(base string, record authRecord) bool {
+	if strings.HasPrefix(strings.TrimSpace(record.ID), managedAuthPrefix) {
+		return true
+	}
+	return isLegacyManagedName(base)
+}
+
+// adoptManagedAuthFile renames a managed record to its readable base name and
+// returns the resulting path. A record already sitting on the target name is
+// only replaced when its key is no longer configured: a stale credential must
+// not shadow the configured key that inherited its label. When the target holds
+// another configured key (two accounts sharing a label) or a hand-written file,
+// both records are kept and the source stays under its disambiguated name.
+func adoptManagedAuthFile(path, base string, expected map[string]string) (string, error) {
 	target := filepath.Join(filepath.Dir(path), base+".json")
 	if filepath.Clean(path) == filepath.Clean(target) {
-		return nil
+		return path, nil
 	}
-	if _, err := os.Stat(target); err == nil {
-		return removeManagedAuthFile(path)
+	if data, err := os.ReadFile(target); err == nil {
+		var occupant authRecord
+		if json.Unmarshal(data, &occupant) != nil || strings.TrimSpace(occupant.APIKey) == "" {
+			return path, nil
+		}
+		if _, live := expected[authRecordID(occupant.APIKey)]; live {
+			// Another configured key already owns the readable name.
+			return path, nil
+		}
+		if !managedAuthRecord(strings.TrimSuffix(filepath.Base(target), ".json"), occupant) {
+			// A hand-written record, never removed from here.
+			return path, nil
+		}
+		if err := removeManagedAuthFile(target); err != nil {
+			return "", err
+		}
 	}
-	return os.Rename(path, target)
+	if err := os.Rename(path, target); err != nil {
+		return "", err
+	}
+	return target, nil
 }
 
 func recordDisabled(data []byte) bool {

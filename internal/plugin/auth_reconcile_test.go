@@ -53,6 +53,133 @@ func writeKeyRecord(t *testing.T, path, key string) {
 	}
 }
 
+// writeManagedRecord writes the record shape this plugin itself creates, so a
+// test can reproduce a credential left behind by an earlier config.
+func writeManagedRecord(t *testing.T, path, key, label, upstream string) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{
+		"type": ProviderID, "id": authRecordID(key), "label": label, "api_key": key, "upstream": upstream,
+	})
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatalf("write record: %v", err)
+	}
+}
+
+func readRecordKey(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	var rec struct {
+		APIKey string `json:"api_key"`
+	}
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatalf("parse record: %v", err)
+	}
+	return rec.APIKey
+}
+
+func odConfig(t *testing.T, label string, keys ...string) config.Config {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("upstreams:\n  - name: od\n    api-keys:\n")
+	for _, key := range keys {
+		b.WriteString("      - name: " + label + "\n        value: \"" + key + "\"\n")
+	}
+	cfg, err := config.Load([]byte(b.String()))
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	return cfg
+}
+
+// A rotated key that inherits the label of a credential whose own key is no
+// longer configured must take over the readable file name instead of being
+// deleted as a duplicate — the stale file would otherwise keep serving the dead
+// key forever.
+func TestReconcileReplacesStaleRecordSharingConfiguredLabel(t *testing.T) {
+	dir := t.TempDir()
+	const staleKey = "stale-open-design-key"
+	const freshKey = "fresh-open-design-key"
+	const label = "OpenDesign"
+	readable := filepath.Join(dir, authFileName(label)+".json")
+	disambiguated := filepath.Join(dir, authFileName(label)+"-2.json")
+	writeManagedRecord(t, readable, staleKey, label, "od")
+	writeManagedRecord(t, disambiguated, freshKey, label, "od")
+
+	rec := &legacyRecorder{entries: []pluginapi.HostAuthFileEntry{
+		{ID: authRecordID(freshKey), Name: filepath.Base(disambiguated), Type: ProviderID, Provider: ProviderID, Path: disambiguated},
+		{ID: authRecordID(staleKey), Name: filepath.Base(readable), Type: ProviderID, Provider: ProviderID, Path: readable},
+	}}
+	m := NewManager(NewHostBridge(rec.responder()))
+	if err := m.reconcileAuthRecords(context.Background(), odConfig(t, label, freshKey)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := readRecordKey(t, readable); got != freshKey {
+		t.Fatalf("stale credential still shadows the configured key: %q", got)
+	}
+	if _, err := os.Stat(disambiguated); !os.IsNotExist(err) {
+		t.Fatalf("configured record left duplicated: %v", err)
+	}
+}
+
+// Two configured accounts may deliberately share a label; both credentials must
+// survive, the second under its disambiguated name.
+func TestReconcileKeepsTwoConfiguredRecordsSharingLabel(t *testing.T) {
+	dir := t.TempDir()
+	const label = "OpenDesign"
+	const firstKey = "first-configured-key"
+	const secondKey = "second-configured-key"
+	readable := filepath.Join(dir, authFileName(label)+".json")
+	disambiguated := filepath.Join(dir, authFileName(label)+"-2.json")
+	writeManagedRecord(t, readable, firstKey, label, "od")
+	writeManagedRecord(t, disambiguated, secondKey, label, "od")
+
+	rec := &legacyRecorder{entries: []pluginapi.HostAuthFileEntry{
+		{ID: authRecordID(firstKey), Name: filepath.Base(readable), Type: ProviderID, Provider: ProviderID, Path: readable},
+		{ID: authRecordID(secondKey), Name: filepath.Base(disambiguated), Type: ProviderID, Provider: ProviderID, Path: disambiguated},
+	}}
+	m := NewManager(NewHostBridge(rec.responder()))
+	if err := m.reconcileAuthRecords(context.Background(), odConfig(t, label, firstKey, secondKey)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := readRecordKey(t, readable); got != firstKey {
+		t.Fatalf("first credential changed: %q", got)
+	}
+	if got := readRecordKey(t, disambiguated); got != secondKey {
+		t.Fatalf("second credential removed or changed: %q", got)
+	}
+}
+
+// A hand-written file that happens to use the label must not be removed to make
+// room for a configured key; the plugin keeps its own record disambiguated.
+func TestReconcileKeepsHandWrittenRecordOnLabelCollision(t *testing.T) {
+	dir := t.TempDir()
+	const label = "OpenDesign"
+	const handwrittenKey = "hand-written-key"
+	const configKey = "configured-key"
+	handwritten := filepath.Join(dir, authFileName(label)+".json")
+	own := filepath.Join(dir, authFileName(label)+"-2.json")
+	writeKeyRecord(t, handwritten, handwrittenKey)
+	writeManagedRecord(t, own, configKey, label, "od")
+
+	rec := &legacyRecorder{entries: []pluginapi.HostAuthFileEntry{
+		{ID: "custom", Name: filepath.Base(handwritten), Type: ProviderID, Provider: ProviderID, Path: handwritten},
+		{ID: authRecordID(configKey), Name: filepath.Base(own), Type: ProviderID, Provider: ProviderID, Path: own},
+	}}
+	m := NewManager(NewHostBridge(rec.responder()))
+	if err := m.reconcileAuthRecords(context.Background(), odConfig(t, label, configKey)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := readRecordKey(t, handwritten); got != handwrittenKey {
+		t.Fatalf("hand-written record was replaced: %q", got)
+	}
+	if got := readRecordKey(t, own); got != configKey {
+		t.Fatalf("configured record was lost: %q", got)
+	}
+}
+
 func TestReconcileKeepsReadableFileNameAndRemovesUnknownKey(t *testing.T) {
 	dir := t.TempDir()
 	readable := filepath.Join(dir, authFileName("OpenCode Go")+".json")

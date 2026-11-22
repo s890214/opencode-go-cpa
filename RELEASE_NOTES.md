@@ -1,3 +1,23 @@
+## v0.8.1 — a rotated key takes over its label
+
+Credentials are matched to `api-keys` by key, but the file name only carries the
+account label. A rotated key that reuses the old label could therefore end up
+behind the stale credential: the new record was created as `<Label>-2.json`,
+then folded back into `<Label>.json`, found the old file already there and was
+**deleted as a duplicate** — while the old file itself survived, because its
+readable name never proved plugin ownership. The channel then kept serving the
+dead key forever (402/403 on every model).
+
+Fixed in the reconcile pass:
+
+- Ownership is proven by the canonical `id` (`opencode-go-key-<sha256(key)>`) as
+  well as by the legacy `opencode-go…` file names, so a stale credential with a
+  readable label is now recognised and removed once its key leaves the config.
+- Folding a record onto a name that is already taken only replaces the occupant
+  when that occupant's key is **not** configured. Two configured accounts that
+  deliberately share a label both survive (the second keeps its `-2` suffix),
+  and a hand-written file is still never touched.
+
 ## v0.8.0 — one schema for every upstream
 
 **Breaking.** The plugin now has a single way to describe an upstream: the
