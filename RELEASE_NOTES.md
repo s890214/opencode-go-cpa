@@ -1,3 +1,37 @@
+## v0.8.2 — parallel tools stay in one turn, and big budgets reach max
+
+Three behaviour fixes aligned with the host's November semantics.
+
+**Gemini: parallel tool results share one user turn.** Gemini pairs
+`functionResponse` parts by slot with the preceding model turn, so every result
+of one parallel batch must live in a single `user` turn, ordered like the
+`functionCall` parts it answers. The adapter emitted one turn per tool message,
+which strict implementations reject as a count mismatch and lenient ones
+mis-pair. Consecutive tool messages are now collected and flushed as one turn,
+ordered by the model turn's `functionCall` order (exact id+name, then id, then
+name; unmatched results keep their relative order at the end instead of being
+dropped). `functionCall` and `functionResponse` now carry the call `id` for
+exact upstream pairing.
+
+**Thinking: budgets above 32768 derive `max`.** The ported threshold table
+stopped at `xhigh`, so a client budget of 64000 mapped to `xhigh` (32768) while
+the host maps it to `max` (128000) — the thinking allowance was understated
+fourfold on translated routes. The table now matches the host: `<=512 minimal`,
+`<=1024 low`, `<=8192 medium`, `<=24576 high`, `<=32768 xhigh`, else `max`,
+still clamped to the levels the model advertises.
+
+**Chat: `developer` messages keep their role and position.** The adapter
+rewrote `role:"developer"` to `system`, downgrading mid-session instructions.
+The upstream accepts the developer role (verified live against
+`/openai/v1/chat/completions` on `deepseek-v4.1-flash`) and the host's own
+Responses→Chat conversion keeps it, so the role is passed through verbatim;
+a developer-only request now also stays byte-identical, keeping prompt caching
+intact.
+
+Live test data is refreshed for the current catalog (`glm-5.3-flash`,
+`mimo-v2.6-flash`, `gpt-6-luna`), which replaced `glm-5.2`, `qwen3.7-max` and
+`gpt-5.6-luna`.
+
 ## v0.8.1 — a rotated key takes over its label
 
 Credentials are matched to `api-keys` by key, but the file name only carries the
