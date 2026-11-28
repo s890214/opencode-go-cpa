@@ -50,7 +50,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "NonStream_Chat_GLM",
 			clientPath: "/v1/chat/completions",
-			model:      modelID("glm-5.2"),
+			model:      modelID("glm-5.3-flash"),
 			stream:     false,
 			buildReq:   buildChatRequest,
 			verifyResp: verifyChatNonStream,
@@ -58,7 +58,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "NonStream_Chat_Qwen",
 			clientPath: "/v1/chat/completions",
-			model:      modelID("qwen3.7-max"),
+			model:      modelID("mimo-v2.6-flash"),
 			stream:     false,
 			buildReq:   buildChatRequest,
 			verifyResp: verifyChatNonStream,
@@ -66,7 +66,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "NonStream_Chat_Luna",
 			clientPath: "/v1/chat/completions",
-			model:      modelID("gpt-5.6-luna"),
+			model:      modelID("gpt-6-luna"),
 			stream:     false,
 			buildReq:   buildChatRequest,
 			verifyResp: verifyChatNonStream,
@@ -74,7 +74,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "NonStream_Messages_GLM",
 			clientPath: "/v1/messages",
-			model:      modelID("glm-5.2"),
+			model:      modelID("glm-5.3-flash"),
 			stream:     false,
 			buildReq:   buildMessagesRequest,
 			verifyResp: verifyMessagesNonStream,
@@ -82,7 +82,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "NonStream_Messages_Qwen",
 			clientPath: "/v1/messages",
-			model:      modelID("qwen3.7-max"),
+			model:      modelID("mimo-v2.6-flash"),
 			stream:     false,
 			buildReq:   buildMessagesRequest,
 			verifyResp: verifyMessagesNonStream,
@@ -90,7 +90,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "NonStream_Messages_Luna",
 			clientPath: "/v1/messages",
-			model:      modelID("gpt-5.6-luna"),
+			model:      modelID("gpt-6-luna"),
 			stream:     false,
 			buildReq:   buildMessagesRequest,
 			verifyResp: verifyMessagesNonStream,
@@ -98,7 +98,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "NonStream_Responses_GLM",
 			clientPath: "/v1/responses",
-			model:      modelID("glm-5.2"),
+			model:      modelID("glm-5.3-flash"),
 			stream:     false,
 			buildReq:   buildResponsesRequest,
 			verifyResp: verifyResponsesNonStream,
@@ -106,7 +106,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "NonStream_Responses_Qwen",
 			clientPath: "/v1/responses",
-			model:      modelID("qwen3.7-max"),
+			model:      modelID("mimo-v2.6-flash"),
 			stream:     false,
 			buildReq:   buildResponsesRequest,
 			verifyResp: verifyResponsesNonStream,
@@ -114,7 +114,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "NonStream_Responses_Luna",
 			clientPath: "/v1/responses",
-			model:      modelID("gpt-5.6-luna"),
+			model:      modelID("gpt-6-luna"),
 			stream:     false,
 			buildReq:   buildResponsesRequest,
 			verifyResp: verifyResponsesNonStream,
@@ -124,7 +124,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "Stream_Chat_GLM",
 			clientPath: "/v1/chat/completions",
-			model:      modelID("glm-5.2"),
+			model:      modelID("glm-5.3-flash"),
 			stream:     true,
 			buildReq:   buildChatRequest,
 			verifyResp: verifyChatStream,
@@ -132,7 +132,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "Stream_Chat_Qwen",
 			clientPath: "/v1/chat/completions",
-			model:      modelID("qwen3.7-max"),
+			model:      modelID("mimo-v2.6-flash"),
 			stream:     true,
 			buildReq:   buildChatRequest,
 			verifyResp: verifyChatStream,
@@ -140,7 +140,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "Stream_Chat_Luna",
 			clientPath: "/v1/chat/completions",
-			model:      modelID("gpt-5.6-luna"),
+			model:      modelID("gpt-6-luna"),
 			stream:     true,
 			buildReq:   buildChatRequest,
 			verifyResp: verifyChatStream,
@@ -148,7 +148,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "Stream_Messages_GLM",
 			clientPath: "/v1/messages",
-			model:      modelID("glm-5.2"),
+			model:      modelID("glm-5.3-flash"),
 			stream:     true,
 			buildReq:   buildMessagesRequest,
 			verifyResp: verifyMessagesStream,
@@ -156,7 +156,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "Stream_Messages_Qwen",
 			clientPath: "/v1/messages",
-			model:      modelID("qwen3.7-max"),
+			model:      modelID("mimo-v2.6-flash"),
 			stream:     true,
 			buildReq:   buildMessagesRequest,
 			verifyResp: verifyMessagesStream,
@@ -164,7 +164,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "Stream_Messages_Luna",
 			clientPath: "/v1/messages",
-			model:      modelID("gpt-5.6-luna"),
+			model:      modelID("gpt-6-luna"),
 			stream:     true,
 			buildReq:   buildMessagesRequest,
 			verifyResp: verifyMessagesStream,
@@ -172,7 +172,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "Stream_Responses_GLM",
 			clientPath: "/v1/responses",
-			model:      modelID("glm-5.2"),
+			model:      modelID("glm-5.3-flash"),
 			stream:     true,
 			buildReq:   buildResponsesRequest,
 			verifyResp: verifyResponsesStream,
@@ -180,7 +180,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "Stream_Responses_Qwen",
 			clientPath: "/v1/responses",
-			model:      modelID("qwen3.7-max"),
+			model:      modelID("mimo-v2.6-flash"),
 			stream:     true,
 			buildReq:   buildResponsesRequest,
 			verifyResp: verifyResponsesStream,
@@ -188,7 +188,7 @@ func TestLiveSmokeSuite(t *testing.T) {
 		{
 			name:       "Stream_Responses_Luna",
 			clientPath: "/v1/responses",
-			model:      modelID("gpt-5.6-luna"),
+			model:      modelID("gpt-6-luna"),
 			stream:     true,
 			buildReq:   buildResponsesRequest,
 			verifyResp: verifyResponsesStream,
@@ -433,7 +433,7 @@ func TestLiveToolCalling(t *testing.T) {
 	t.Run("ChatEndpoint_Tools_MessagesUpstream", func(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		payload := map[string]any{
-			"model": modelID("qwen3.7-max"),
+			"model": modelID("mimo-v2.6-flash"),
 			"messages": []map[string]string{
 				{"role": "user", "content": "What is the weather in Tokyo?"},
 			},
@@ -503,7 +503,7 @@ func TestLiveToolCalling(t *testing.T) {
 	t.Run("MessagesEndpoint_Tools_ChatUpstream", func(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		payload := map[string]any{
-			"model": modelID("glm-5.2"),
+			"model": modelID("glm-5.3-flash"),
 			"messages": []map[string]string{
 				{"role": "user", "content": "What is the weather in Paris?"},
 			},
@@ -568,7 +568,7 @@ func TestLiveThinkingReasoning(t *testing.T) {
 	t.Run("ChatEndpoint_Reasoning_Qwen", func(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		payload := map[string]any{
-			"model": modelID("qwen3.7-max"),
+			"model": modelID("mimo-v2.6-flash"),
 			"messages": []map[string]string{
 				{"role": "user", "content": "Which number is larger: 9.9 or 9.11? Answer briefly in one sentence."},
 			},
@@ -615,7 +615,7 @@ func TestLiveThinkingReasoning(t *testing.T) {
 	t.Run("MessagesEndpoint_Thinking_Qwen", func(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		payload := map[string]any{
-			"model": modelID("qwen3.7-max"),
+			"model": modelID("mimo-v2.6-flash"),
 			"messages": []map[string]string{
 				{"role": "user", "content": "Which number is larger: 9.9 or 9.11? Answer briefly in one sentence."},
 			},
@@ -689,7 +689,7 @@ func TestLiveEdgeCases(t *testing.T) {
 	t.Run("MultiTurnContext_ChatToMessagesRoute", func(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		payload := map[string]any{
-			"model": modelID("qwen3.7-max"),
+			"model": modelID("mimo-v2.6-flash"),
 			"messages": []map[string]string{
 				{"role": "user", "content": "My name is Alice and my secret word is Pineapple."},
 				{"role": "assistant", "content": "Hello Alice! I have noted that your secret word is Pineapple."},
@@ -736,7 +736,7 @@ func TestLiveEdgeCases(t *testing.T) {
 	t.Run("MultiTurnContext_MessagesToChatRoute", func(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		payload := map[string]any{
-			"model": modelID("glm-5.2"),
+			"model": modelID("glm-5.3-flash"),
 			"messages": []map[string]string{
 				{"role": "user", "content": "My favorite fruit is Mango."},
 				{"role": "assistant", "content": "Got it! Your favorite fruit is Mango."},

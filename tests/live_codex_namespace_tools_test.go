@@ -19,7 +19,7 @@ import (
 func TestLiveCodexAdditionalTools_Accepted(t *testing.T) {
 	client := &http.Client{Timeout: 60 * time.Second}
 	payload := map[string]any{
-		"model": modelID("glm-5.2"),
+		"model": modelID("glm-5.3-flash"),
 		"input": []map[string]any{
 			{
 				"type": "additional_tools",
@@ -66,7 +66,7 @@ func TestLiveCodexAdditionalTools_Accepted(t *testing.T) {
 func TestLiveCodexNamespaceTools_NonStreamRoundTrip(t *testing.T) {
 	client := &http.Client{Timeout: 60 * time.Second}
 	payload := map[string]any{
-		"model": modelID("glm-5.2"),
+		"model": modelID("glm-5.3-flash"),
 		"input": "Call spawn_agent now",
 		"tools": []map[string]any{
 			{
@@ -136,7 +136,7 @@ func TestLiveCodexNamespaceTools_NonStreamRoundTrip(t *testing.T) {
 func TestLiveCodexNamespaceTools_StreamRoundTrip(t *testing.T) {
 	client := &http.Client{Timeout: 60 * time.Second}
 	payload := map[string]any{
-		"model": modelID("glm-5.2"),
+		"model": modelID("glm-5.3-flash"),
 		"input": "Call spawn_agent now",
 		"tools": []map[string]any{
 			{
@@ -240,7 +240,7 @@ func TestLiveCodexNamespaceTools_StreamRoundTrip(t *testing.T) {
 func TestLiveCodexGrokReasoningReplayAccepted(t *testing.T) {
 	client := &http.Client{Timeout: 60 * time.Second}
 	payload := map[string]any{
-		"model": modelID("grok-4.6"),
+		"model": modelID("gpt-6-luna"),
 		"input": []map[string]any{
 			{
 				"type":    "message",

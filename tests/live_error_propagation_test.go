@@ -24,7 +24,7 @@ func TestLiveErrorPropagation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reqBody := map[string]any{
-				"model":       modelID("glm-5.2"),
+				"model":       modelID("glm-5.3-flash"),
 				"messages":    []map[string]string{{"role": "user", "content": "hi"}},
 				"stream":      tc.stream,
 				"temperature": 999,

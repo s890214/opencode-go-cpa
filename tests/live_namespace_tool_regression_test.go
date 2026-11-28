@@ -16,7 +16,7 @@ import (
 func TestLiveCodexNamespaceToolRejected(t *testing.T) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	payload := map[string]any{
-		"model": modelID("glm-5.2"),
+		"model": modelID("glm-5.3-flash"),
 		"input": "say ok",
 		"tools": []map[string]any{
 			{

@@ -35,9 +35,9 @@ func TestLiveSessionAffinity(t *testing.T) {
 		name    string
 		enabled bool
 	}{
-		{name: "glm-5.2", enabled: true},
-		{name: "qwen3.7-max", enabled: true},
-		{name: "gpt-5.6-luna", enabled: envBool("CPA_LUNA_ENABLED")},
+		{name: "glm-5.3-flash", enabled: true},
+		{name: "mimo-v2.6-flash", enabled: true},
+		{name: "gpt-6-luna", enabled: envBool("CPA_LUNA_ENABLED")},
 	}
 	formats := []struct {
 		name         string
@@ -87,7 +87,7 @@ func TestLiveSessionAffinity(t *testing.T) {
 		if betaHash == alphaHash {
 			t.Fatal("test inputs unexpectedly produced the same hash")
 		}
-		body := affinityRequestBody(t, "chat", modelID("glm-5.2"), beta, false, false)
+		body := affinityRequestBody(t, "chat", modelID("glm-5.3-flash"), beta, false, false)
 		line := runAffinityRequest(t, client, debugLog, "/v1/chat/completions", "openai", body, false)
 		assertSessionLine(t, line, "openai", betaHash, false, false)
 	})
@@ -95,7 +95,7 @@ func TestLiveSessionAffinity(t *testing.T) {
 	t.Run("consecutive_initial_user_messages", func(t *testing.T) {
 		second := "-second-user-part"
 		body := map[string]any{
-			"model": modelID("glm-5.2"),
+			"model": modelID("glm-5.3-flash"),
 			"messages": []map[string]any{
 				{"role": "user", "content": alpha},
 				{"role": "user", "content": second},
@@ -108,7 +108,7 @@ func TestLiveSessionAffinity(t *testing.T) {
 
 	t.Run("empty_input_fallback", func(t *testing.T) {
 		body := map[string]any{
-			"model": modelID("glm-5.2"),
+			"model": modelID("glm-5.3-flash"),
 			"messages": []map[string]any{
 				{"role": "assistant", "content": "prefill"},
 			},

@@ -19,7 +19,7 @@ import (
 func TestLiveResponsesUntypedMessageItem(t *testing.T) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	payload := map[string]any{
-		"model":             modelID("glm-5.2"),
+		"model":             modelID("glm-5.3-flash"),
 		"max_output_tokens": 16,
 		"input": []map[string]any{
 			{"role": "user", "content": "say ok"},
@@ -56,7 +56,7 @@ func TestLiveResponsesUnsupportedItemDoesNotCoolDownAuth(t *testing.T) {
 
 	// Step 1: Malformed input item type must yield HTTP 400 Bad Request.
 	badPayload := map[string]any{
-		"model":             modelID("glm-5.2"),
+		"model":             modelID("glm-5.3-flash"),
 		"max_output_tokens": 16,
 		"input": []map[string]any{
 			{"type": "web_search"},
@@ -87,7 +87,7 @@ func TestLiveResponsesUnsupportedItemDoesNotCoolDownAuth(t *testing.T) {
 	// Step 2: Immediately send a valid request; auth must remain available (HTTP 200).
 	time.Sleep(500 * time.Millisecond)
 	validPayload := map[string]any{
-		"model":      modelID("glm-5.2"),
+		"model":      modelID("glm-5.3-flash"),
 		"messages":   []map[string]string{{"role": "user", "content": "say ok"}},
 		"max_tokens": 16,
 	}
@@ -120,7 +120,7 @@ func TestLiveResponsesUnsupportedItemDoesNotCoolDownAuth(t *testing.T) {
 func TestLiveResponsesStreamDoneEvents(t *testing.T) {
 	client := &http.Client{Timeout: 60 * time.Second}
 	payload := map[string]any{
-		"model":             modelID("glm-5.2"),
+		"model":             modelID("glm-5.3-flash"),
 		"max_output_tokens": 256,
 		"stream":            true,
 		"input": []map[string]any{
@@ -190,7 +190,7 @@ func TestLiveResponsesStreamDoneEvents(t *testing.T) {
 func TestLiveInHistorySystemRoleInMessages(t *testing.T) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	payload := map[string]any{
-		"model": modelID("glm-5.2"),
+		"model": modelID("glm-5.3-flash"),
 		"messages": []map[string]any{
 			{"role": "user", "content": "hello"},
 			{"role": "system", "content": []map[string]string{{"type": "text", "text": "environment reminder"}}},
@@ -228,7 +228,7 @@ func TestLiveInHistorySystemRoleInMessages(t *testing.T) {
 func TestLiveResponsesMultipartToolOutput(t *testing.T) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	payload := map[string]any{
-		"model":             modelID("glm-5.2"),
+		"model":             modelID("glm-5.3-flash"),
 		"max_output_tokens": 16,
 		"input": []map[string]any{
 			{
