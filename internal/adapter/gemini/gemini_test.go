@@ -264,3 +264,149 @@ func TestStreamChunkCarriesModelAndSkipsZeroUsage(t *testing.T) {
 		t.Fatalf("final usage trailer missing: %q", events)
 	}
 }
+
+// TestFromChatRequestMergesParallelToolResults pins the batch contract: all
+// results of one parallel tool call must land in a single user turn, in the
+// same order as the model turn's functionCall parts, each carrying the call
+// id for exact upstream pairing.
+func TestFromChatRequestMergesParallelToolResults(t *testing.T) {
+	body := []byte(`{
+	  "messages": [
+	    {"role": "user", "content": "run three tools"},
+	    {"role": "assistant", "content": null, "tool_calls": [
+	      {"id": "call_a", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"a\"}"}},
+	      {"id": "call_b", "type": "function", "function": {"name": "grep", "arguments": "{\"pattern\":\"b\"}"}},
+	      {"id": "call_c", "type": "function", "function": {"name": "echo", "arguments": "{\"x\":\"c\"}"}}
+	    ]},
+	    {"role": "tool", "tool_call_id": "call_a", "content": "ra"},
+	    {"role": "tool", "tool_call_id": "call_b", "content": "rb"},
+	    {"role": "tool", "tool_call_id": "call_c", "content": "rc"}
+	  ]
+	}`)
+	out, eErr := FromChatRequest(body, nil)
+	if eErr != nil {
+		t.Fatalf("FromChatRequest: %v", eErr)
+	}
+	var req gRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(req.Contents) != 3 {
+		t.Fatalf("contents = %d, want 3 (user, model, one merged user): %s", len(req.Contents), out)
+	}
+	turn := req.Contents[2]
+	if turn.Role != "user" || len(turn.Parts) != 3 {
+		t.Fatalf("merged tool turn = %+v", turn)
+	}
+	for i, want := range []string{"read", "grep", "echo"} {
+		fr := turn.Parts[i].FunctionResponse
+		if fr == nil || fr.Name != want {
+			t.Fatalf("part %d = %+v, want functionResponse %q", i, turn.Parts[i], want)
+		}
+	}
+	if got := turn.Parts[0].FunctionResponse.ID; got != "call_a" {
+		t.Fatalf("functionResponse id = %q, want call_a", got)
+	}
+	if call := req.Contents[1].Parts[1].FunctionCall; call == nil || call.ID != "call_b" {
+		t.Fatalf("functionCall id not carried: %+v", req.Contents[1].Parts[1])
+	}
+}
+
+// TestFromChatRequestReordersOutOfOrderToolResults pins slot alignment: a
+// client may deliver parallel results in any order, Gemini pairs them by
+// position with the preceding model turn.
+func TestFromChatRequestReordersOutOfOrderToolResults(t *testing.T) {
+	body := []byte(`{
+	  "messages": [
+	    {"role": "user", "content": "go"},
+	    {"role": "assistant", "content": null, "tool_calls": [
+	      {"id": "call_1", "type": "function", "function": {"name": "alpha", "arguments": "{}"}},
+	      {"id": "call_2", "type": "function", "function": {"name": "beta", "arguments": "{}"}}
+	    ]},
+	    {"role": "tool", "tool_call_id": "call_2", "content": "second"},
+	    {"role": "tool", "tool_call_id": "call_1", "content": "first"}
+	  ]
+	}`)
+	out, eErr := FromChatRequest(body, nil)
+	if eErr != nil {
+		t.Fatalf("FromChatRequest: %v", eErr)
+	}
+	var req gRequest
+	_ = json.Unmarshal(out, &req)
+	parts := req.Contents[2].Parts
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d: %s", len(parts), out)
+	}
+	if parts[0].FunctionResponse.Name != "alpha" || parts[1].FunctionResponse.Name != "beta" {
+		t.Fatalf("order = %q, %q; want alpha, beta", parts[0].FunctionResponse.Name, parts[1].FunctionResponse.Name)
+	}
+	if !strings.Contains(string(parts[0].FunctionResponse.Response), "first") {
+		t.Fatalf("alpha payload = %s", parts[0].FunctionResponse.Response)
+	}
+}
+
+// TestFromChatRequestKeepsUnmatchedToolResults pins that results without a
+// counterpart are not dropped: they keep their order after the aligned ones
+// so upstream validation still sees the full history.
+func TestFromChatRequestKeepsUnmatchedToolResults(t *testing.T) {
+	body := []byte(`{
+	  "messages": [
+	    {"role": "user", "content": "go"},
+	    {"role": "assistant", "content": null, "tool_calls": [
+	      {"id": "call_1", "type": "function", "function": {"name": "alpha", "arguments": "{}"}}
+	    ]},
+	    {"role": "tool", "tool_call_id": "call_orphan", "content": "orphan"},
+	    {"role": "tool", "tool_call_id": "call_1", "content": "matched"}
+	  ]
+	}`)
+	out, eErr := FromChatRequest(body, nil)
+	if eErr != nil {
+		t.Fatalf("FromChatRequest: %v", eErr)
+	}
+	var req gRequest
+	_ = json.Unmarshal(out, &req)
+	parts := req.Contents[2].Parts
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want 2 (matched then orphan): %s", len(parts), out)
+	}
+	if parts[0].FunctionResponse.ID != "call_1" || parts[1].FunctionResponse.ID != "call_orphan" {
+		t.Fatalf("order = %q, %q; want call_1, call_orphan", parts[0].FunctionResponse.ID, parts[1].FunctionResponse.ID)
+	}
+}
+
+// TestFromChatRequestToolTurnInterruptedByUser pins the boundary: a user
+// message between tool results must flush the batch instead of merging across
+// the interruption.
+func TestFromChatRequestToolTurnInterruptedByUser(t *testing.T) {
+	body := []byte(`{
+	  "messages": [
+	    {"role": "user", "content": "go"},
+	    {"role": "assistant", "content": null, "tool_calls": [
+	      {"id": "call_1", "type": "function", "function": {"name": "alpha", "arguments": "{}"}}
+	    ]},
+	    {"role": "tool", "tool_call_id": "call_1", "content": "done"},
+	    {"role": "user", "content": "next question"},
+	    {"role": "assistant", "content": null, "tool_calls": [
+	      {"id": "call_2", "type": "function", "function": {"name": "beta", "arguments": "{}"}}
+	    ]},
+	    {"role": "tool", "tool_call_id": "call_2", "content": "done too"}
+	  ]
+	}`)
+	out, eErr := FromChatRequest(body, nil)
+	if eErr != nil {
+		t.Fatalf("FromChatRequest: %v", eErr)
+	}
+	var req gRequest
+	_ = json.Unmarshal(out, &req)
+	roles := make([]string, 0, len(req.Contents))
+	for _, c := range req.Contents {
+		roles = append(roles, c.Role)
+	}
+	want := []string{"user", "model", "user", "user", "model", "user"}
+	if strings.Join(roles, ",") != strings.Join(want, ",") {
+		t.Fatalf("roles = %v, want %v: %s", roles, want, out)
+	}
+	if len(req.Contents[2].Parts) != 1 || len(req.Contents[5].Parts) != 1 {
+		t.Fatalf("interrupted batches must stay separate: %+v", req.Contents)
+	}
+}

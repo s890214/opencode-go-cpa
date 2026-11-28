@@ -80,13 +80,73 @@ type gFileData struct {
 }
 
 type gFunctionCall struct {
+	ID   string          `json:"id,omitempty"`
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args,omitempty"`
 }
 
 type gFunctionResp struct {
+	ID       string          `json:"id,omitempty"`
 	Name     string          `json:"name"`
 	Response json.RawMessage `json:"response"`
+}
+
+// toolCallRef names one functionCall part of a model turn; it is the slot
+// contract a parallel batch of tool results must line up with.
+type toolCallRef struct {
+	id   string
+	name string
+}
+
+// pendingToolResult is one collected tool message awaiting the shared turn.
+type pendingToolResult struct {
+	id       string
+	name     string
+	response json.RawMessage
+}
+
+// orderToolResults aligns collected tool results with the preceding model
+// turn's functionCall order: exact (id, name) matches win, then id-only, then
+// name-only. Results without a counterpart keep their relative order at the
+// end so incomplete or excess responses still reach upstream validation
+// instead of being dropped or reordered arbitrarily.
+func orderToolResults(pending []pendingToolResult, calls []toolCallRef) []pendingToolResult {
+	if len(pending) <= 1 || len(calls) == 0 {
+		return pending
+	}
+	used := make([]bool, len(pending))
+	out := make([]pendingToolResult, 0, len(pending))
+	take := func(match func(pendingToolResult) bool) bool {
+		for i, p := range pending {
+			if !used[i] && match(p) {
+				out = append(out, p)
+				used[i] = true
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range calls {
+		if take(func(p pendingToolResult) bool {
+			return c.id != "" && p.id == c.id && c.name != "" && p.name == c.name
+		}) {
+			continue
+		}
+		if take(func(p pendingToolResult) bool {
+			return c.id != "" && p.id == c.id
+		}) {
+			continue
+		}
+		take(func(p pendingToolResult) bool {
+			return c.name != "" && p.name == c.name
+		})
+	}
+	for i, p := range pending {
+		if !used[i] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 type gContent struct {
@@ -152,7 +212,36 @@ func FromChatRequest(chatBody []byte, ts *pluginapi.ThinkingSupport) ([]byte, *e
 			}
 		}
 	}
+	// Gemini pairs parallel function responses by slot with the preceding
+	// model turn: every response of one parallel batch must live in a single
+	// user turn, ordered like the functionCall parts it answers. Consecutive
+	// tool messages are therefore collected and flushed as one turn instead
+	// of one turn per result — a split batch is rejected by strict Gemini
+	// implementations ("function response count mismatch").
+	var (
+		pendingTools   []pendingToolResult
+		lastModelCalls []toolCallRef
+	)
+	flushTools := func() {
+		if len(pendingTools) == 0 {
+			return
+		}
+		ordered := orderToolResults(pendingTools, lastModelCalls)
+		parts := make([]gPart, 0, len(ordered))
+		for _, p := range ordered {
+			parts = append(parts, gPart{FunctionResponse: &gFunctionResp{
+				ID:       p.id,
+				Name:     p.name,
+				Response: p.response,
+			}})
+		}
+		req.Contents = append(req.Contents, gContent{Role: "user", Parts: parts})
+		pendingTools = nil
+	}
 	for _, msg := range src.Messages {
+		if msg.Role != "tool" {
+			flushTools()
+		}
 		switch msg.Role {
 		case "system", "developer":
 			parts, eErr := decodeChatParts(msg.Content)
@@ -165,6 +254,7 @@ func FromChatRequest(chatBody []byte, ts *pluginapi.ThinkingSupport) ([]byte, *e
 				}
 			}
 		case "user":
+			lastModelCalls = nil
 			parts, eErr := decodeChatParts(msg.Content)
 			if eErr != nil {
 				return nil, eErr
@@ -173,6 +263,7 @@ func FromChatRequest(chatBody []byte, ts *pluginapi.ThinkingSupport) ([]byte, *e
 				req.Contents = append(req.Contents, gContent{Role: "user", Parts: parts})
 			}
 		case "assistant":
+			lastModelCalls = nil
 			parts, eErr := decodeChatParts(msg.Content)
 			if eErr != nil {
 				return nil, eErr
@@ -187,7 +278,10 @@ func FromChatRequest(chatBody []byte, ts *pluginapi.ThinkingSupport) ([]byte, *e
 					wrapped, _ := json.Marshal(map[string]string{"input": raw})
 					args = string(wrapped)
 				}
-				parts = append(parts, gPart{FunctionCall: &gFunctionCall{Name: tc.Function.Name, Args: json.RawMessage(args)}})
+				parts = append(parts, gPart{FunctionCall: &gFunctionCall{ID: tc.ID, Name: tc.Function.Name, Args: json.RawMessage(args)}})
+				if tc.ID != "" || tc.Function.Name != "" {
+					lastModelCalls = append(lastModelCalls, toolCallRef{id: tc.ID, name: tc.Function.Name})
+				}
 			}
 			if len(parts) > 0 {
 				req.Contents = append(req.Contents, gContent{Role: "model", Parts: parts})
@@ -208,13 +302,16 @@ func FromChatRequest(chatBody []byte, ts *pluginapi.ThinkingSupport) ([]byte, *e
 				output = b.String()
 			}
 			response, _ := json.Marshal(map[string]any{"output": output, "tool_call_id": msg.ToolCallID})
-			req.Contents = append(req.Contents, gContent{Role: "user", Parts: []gPart{
-				{FunctionResponse: &gFunctionResp{Name: name, Response: response}},
-			}})
+			pendingTools = append(pendingTools, pendingToolResult{
+				id:       msg.ToolCallID,
+				name:     name,
+				response: response,
+			})
 		default:
 			return nil, shared.ValidateRole(msg.Role, "Gemini")
 		}
 	}
+	flushTools()
 	if len(systemParts) > 0 {
 		req.SystemInstruction = &gContent{Parts: []gPart{{Text: strings.Join(systemParts, "\n\n")}}}
 	}
