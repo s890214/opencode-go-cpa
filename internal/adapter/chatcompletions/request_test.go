@@ -937,20 +937,31 @@ func TestMalformedToolChoiceRejected(t *testing.T) {
 	}
 }
 
-func TestBuildOpenAIRequestDeveloperRole(t *testing.T) {
+// TestBuildOpenAIRequestPreservesDeveloperRole pins role fidelity: the
+// upstream accepts developer messages (verified live on deepseek-v4.1-flash)
+// and CPA keeps the role as of 2026-11, so the adapter must not rewrite it to
+// system. The body also stays byte-identical (only the model id may change),
+// which keeps prompt caching intact.
+func TestBuildOpenAIRequestPreservesDeveloperRole(t *testing.T) {
 	body := `{"model":"deepseek-v4.1-flash","messages":[{"role":"developer","content":"system instructions"},{"role":"user","content":"hi"}]}`
 	out, eErr := BuildRequest("deepseek-v4.1-flash", "openai", []byte(body), nil)
 	m := decodeOut(t, out, eErr)
 	msgs, ok := m["messages"].([]any)
-	if !ok || len(msgs) < 1 {
+	if !ok || len(msgs) != 2 {
 		t.Fatalf("invalid messages: %v", m["messages"])
 	}
 	first, ok := msgs[0].(map[string]any)
 	if !ok {
 		t.Fatalf("invalid message format: %v", msgs[0])
 	}
-	if got := first["role"]; got != "system" {
-		t.Fatalf("expected role %q, got %q", "system", got)
+	if got := first["role"]; got != "developer" {
+		t.Fatalf("expected role %q, got %q", "developer", got)
+	}
+	if second, ok := msgs[1].(map[string]any); !ok || second["role"] != "user" {
+		t.Fatalf("developer message must keep its position: %v", msgs)
+	}
+	if string(out) != body {
+		t.Fatalf("developer-only request must pass through byte-for-byte:\n got: %s\nwant: %s", out, body)
 	}
 }
 

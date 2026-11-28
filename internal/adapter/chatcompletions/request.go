@@ -204,11 +204,16 @@ func firstToolCallID(raw json.RawMessage) string {
 }
 
 // buildOpenAIRequest rewrites the top-level model field of an OpenAI request
-// body to upstreamModel, normalizes role:"developer" messages to role:"system",
-// strips any malformed top-level thinking object, and replays the reasoning of
-// every assistant tool call. DeepSeek models fail if thinking lacks a valid
-// string type field, if messages contain role:"developer", or if an assistant
-// turn carrying tool_calls has no reasoning_content while thinking mode is on.
+// body to upstreamModel, strips any malformed top-level thinking object, and
+// replays the reasoning of every assistant tool call. DeepSeek models fail if
+// thinking lacks a valid string type field, or if an assistant turn carrying
+// tool_calls has no reasoning_content while thinking mode is on.
+//
+// role:"developer" messages are preserved verbatim (role and position). The
+// upstream accepts the developer role — verified live against
+// /openai/v1/chat/completions on deepseek-v4.1-flash — and CPA's own
+// Responses→Chat conversion kept the role as of 2026-11, so rewriting it to
+// "system" would only downgrade mid-session instructions.
 func buildOpenAIRequest(upstreamModel string, body []byte, tools *shared.ResponseTools) ([]byte, *errclass.Error) {
 	var req map[string]json.RawMessage
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -226,9 +231,8 @@ func buildOpenAIRequest(upstreamModel string, body []byte, tools *shared.Respons
 	var msgsModified bool
 	if rawMsgs, ok := req["messages"]; ok {
 		rawStr := string(rawMsgs)
-		needsDeveloper := strings.Contains(rawStr, `"developer"`)
 		needsReasoning := strings.Contains(rawStr, `"tool_calls"`)
-		if needsDeveloper || needsReasoning {
+		if needsReasoning {
 			var msgs []map[string]json.RawMessage
 			if err := json.Unmarshal(rawMsgs, &msgs); err == nil {
 				for _, m := range msgs {
@@ -236,12 +240,7 @@ func buildOpenAIRequest(upstreamModel string, body []byte, tools *shared.Respons
 					if err := json.Unmarshal(m["role"], &role); err != nil {
 						continue
 					}
-					if role == "developer" {
-						m["role"] = json.RawMessage(`"system"`)
-						msgsModified = true
-						role = "system"
-					}
-					if !needsReasoning || role != "assistant" {
+					if role != "assistant" {
 						continue
 					}
 					rawCalls, hasCalls := m["tool_calls"]
