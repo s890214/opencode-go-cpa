@@ -80,8 +80,9 @@ func TestEffortFromBudgetDisabledBudget(t *testing.T) {
 }
 
 // TestEffortFromBudgetThresholdTable pins the ported host threshold mapping
-// (SDK convert.go @ v8.0.0: <=512 minimal, <=1024 low, <=8192 medium,
-// <=24576 high, else xhigh) followed by nearest-supported clamping.
+// (SDK convert.go @ v8.1.8: <=512 minimal, <=1024 low, <=8192 medium,
+// <=24576 high, <=32768 xhigh, else max) followed by nearest-supported
+// clamping.
 func TestEffortFromBudgetThresholdTable(t *testing.T) {
 	cases := []struct {
 		name string
@@ -105,8 +106,12 @@ func TestEffortFromBudgetThresholdTable(t *testing.T) {
 			&pluginapi.ThinkingSupport{Levels: []string{"low", "medium", "high"}}, "high"},
 		{"past high is xhigh", 24577,
 			&pluginapi.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}}, "xhigh"},
-		{"huge budget derives xhigh", 999999,
+		{"upper xhigh bound", 32768,
 			&pluginapi.ThinkingSupport{Levels: CanonicalLevels}, "xhigh"},
+		{"just past xhigh is max", 32769,
+			&pluginapi.ThinkingSupport{Levels: CanonicalLevels}, "max"},
+		{"huge budget derives max", 999999,
+			&pluginapi.ThinkingSupport{Levels: CanonicalLevels}, "max"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -132,8 +137,10 @@ func TestEffortFromBudgetClampToSupported(t *testing.T) {
 			&pluginapi.ThinkingSupport{Max: 24576, Levels: []string{"low", "high"}}, "low"},
 		{"medium nearer high clamps up", 8192,
 			&pluginapi.ThinkingSupport{Levels: []string{"high"}}, "high"},
-		{"xhigh clamps to high not max", 999999,
-			&pluginapi.ThinkingSupport{Levels: []string{"low", "high", "max"}}, "high"},
+		{"derived max passes through when supported", 999999,
+			&pluginapi.ThinkingSupport{Levels: []string{"low", "high", "max"}}, "max"},
+		{"derived max clamps down to high when unsupported", 999999,
+			&pluginapi.ThinkingSupport{Levels: []string{"low", "high"}}, "high"},
 		{"minimal clamps to none when only none and high", 1,
 			&pluginapi.ThinkingSupport{Levels: []string{"none", "high"}}, "none"},
 		{"single level always wins", 12345,

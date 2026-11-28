@@ -33,10 +33,13 @@ var levelBudgetTable = map[string]int64{
 }
 
 // budgetToLevel ports the host's ConvertBudgetToLevel fixed thresholds
-// (SDK internal/thinking/convert.go @ v8.0.0: ThresholdMinimal/Low/Medium/
-// High = 512/1024/8192/24576): <=512 minimal, <=1024 low, <=8192 medium,
-// <=24576 high, else xhigh. Callers handle the -1→auto and 0→none sentinels;
-// "max" is never derived from a budget.
+// (SDK internal/thinking/convert.go @ v8.1.8: ThresholdMinimal/Low/Medium/
+// High/XHigh = 512/1024/8192/24576/32768): <=512 minimal, <=1024 low,
+// <=8192 medium, <=24576 high, <=32768 xhigh, else max. Callers handle the
+// -1→auto and 0→none sentinels. The host derives "max" from budgets above
+// ThresholdXHigh, so a large client budget must not be silently capped at
+// xhigh (that would understate the thinking allowance by 4x: the max entry
+// in levelBudgetTable is 128000, xhigh is 32768).
 func budgetToLevel(budget int64) string {
 	switch {
 	case budget <= 512:
@@ -47,8 +50,10 @@ func budgetToLevel(budget int64) string {
 		return "medium"
 	case budget <= 24576:
 		return "high"
-	default:
+	case budget <= 32768:
 		return "xhigh"
+	default:
+		return "max"
 	}
 }
 
